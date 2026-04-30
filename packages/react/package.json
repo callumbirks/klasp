@@ -1,0 +1,29 @@
+{
+    "name": "@klasp/react",
+    "version": "0.0.0",
+    "description": "React bindings for Klasp.",
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "tsup",
+        "dev": "tsup --watch",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "lint": "biome check ."
+    },
+    "dependencies": {
+        "@klasp/client": "workspace:*"
+    },
+    "peerDependencies": {
+        "react": "^18.0.0 || ^19.0.0"
+    }
+}

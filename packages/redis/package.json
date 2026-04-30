@@ -1,0 +1,27 @@
+{
+    "name": "@klasp/redis",
+    "version": "0.0.0",
+    "description": "Redis adapter for Klasp Realtime APIs.",
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "tsup",
+        "dev": "tsup --watch",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "lint": "biome check ."
+    },
+    "dependencies": {
+        "@klasp/core": "workspace:*",
+        "redis": "^5.0.0"
+    }
+}
