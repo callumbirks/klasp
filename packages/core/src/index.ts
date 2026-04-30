@@ -35,3 +35,28 @@ export interface KlaspInvalidationEvent {
 export interface KlaspLiveConfig {
     topics: string[];
 }
+
+export interface KlaspRpcRequest<TInput> {
+    version: number;
+    type: "query" | "mutation";
+    path: string;
+    input: TInput;
+}
+
+export type KlaspRpcResponse<TOutput> =
+    | {
+          ok: true;
+          data: TOutput;
+          live: KlaspLiveConfig;
+          error: undefined;
+      }
+    | {
+          ok: false;
+          error: {
+              code: KlaspErrorCode;
+              message: string;
+              details?: unknown;
+          };
+          data: undefined;
+          live: undefined;
+      };

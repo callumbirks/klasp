@@ -21,6 +21,7 @@
         "lint": "biome check ."
     },
     "dependencies": {
+        "@klasp/core": "workspace:*",
         "@klasp/server": "workspace:*"
     },
     "peerDependencies": {

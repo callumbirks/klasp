@@ -37,12 +37,24 @@ importers:
 
   packages/hono:
     dependencies:
+      '@klasp/core':
+        specifier: workspace:*
+        version: link:../core
       '@klasp/server':
         specifier: workspace:*
         version: link:../server
       hono:
         specifier: ^4.0.0
         version: 4.12.16
+
+  packages/react:
+    dependencies:
+      '@klasp/client':
+        specifier: workspace:*
+        version: link:../client
+      react:
+        specifier: ^18.0.0 || ^19.0.0
+        version: 19.2.5
 
   packages/redis:
     dependencies:
@@ -1012,6 +1024,10 @@ packages:
 
   queue-microtask@1.2.3:
     resolution: {integrity: sha512-NuaNSa6flKT5JaSYQzJok04JzTL1CA6aGhv5rfLW3PgqA+M2ChpZQnAC8h8i4ZFkBS8X5RqkDBHA7r4hej3K9A==}
+
+  react@19.2.5:
+    resolution: {integrity: sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA==}
+    engines: {node: '>=0.10.0'}
 
   read-yaml-file@1.1.0:
     resolution: {integrity: sha512-VIMnQi/Z4HT2Fxuwg5KrY174U1VdUIASQVWXXyqtNRtxSr9IYkn1rsI6Tb6HsrHCmB7gVpNwX6JxPTHcH6IoTA==}
@@ -2078,6 +2094,8 @@ snapshots:
   quansync@0.2.11: {}
 
   queue-microtask@1.2.3: {}
+
+  react@19.2.5: {}
 
   read-yaml-file@1.1.0:
     dependencies:

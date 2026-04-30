@@ -46,6 +46,7 @@ export interface Klasp<TContext extends KlaspContext = KlaspContext> {
     ): TProcedures;
     createContext(request: Request): Promise<TContext>;
     runtime: KlaspRuntime;
+    realtime: KlaspRealtimeAdapter | undefined;
 }
 
 export function createKlasp<TContext extends KlaspContext = KlaspContext>(
@@ -97,5 +98,6 @@ export function createKlasp<TContext extends KlaspContext = KlaspContext>(
         },
 
         runtime,
+        realtime: options.realtime,
     };
 }

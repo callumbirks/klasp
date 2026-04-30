@@ -1,4 +1,9 @@
 import type {
+    KlaspInvalidationEvent,
+    KlaspRpcRequest,
+    KlaspRpcResponse,
+} from "@klasp/core";
+import type {
     Klasp,
     KlaspMutationDefinition,
     KlaspQueryDefinition,
@@ -17,16 +22,19 @@ export interface KlaspHonoHandlerOptions {
 export function klaspHandler(options: KlaspHonoHandlerOptions): Hono {
     const app = new Hono();
 
-    app.post("/call/:procedure", async (c) => {
-        const procedureName = c.req.param("procedure");
-        const procedure = options.api[procedureName];
+    app.post("/rpc", async (c) => {
+        const request = await c.req.json<KlaspRpcRequest<unknown>>();
+        const procedure = options.api[request.path];
 
         if (!procedure) {
-            return c.json(
+            return c.json<KlaspRpcResponse<unknown>>(
                 {
+                    ok: false,
+                    data: undefined,
+                    live: undefined,
                     error: {
                         code: "NOT_FOUND",
-                        message: `Procedure '${procedureName}' was not found.`,
+                        message: `Procedure '${request.path}' was not found.`,
                     },
                 },
                 404,
@@ -51,30 +59,95 @@ export function klaspHandler(options: KlaspHonoHandlerOptions): Hono {
                 ? procedure.live({ input, ctx })
                 : undefined;
 
-        return c.json({
+        return c.json<KlaspRpcResponse<unknown>>({
+            ok: true,
             data: result,
             live,
+            error: undefined,
         });
     });
 
     app.get("/events", async (c) => {
+        await options.klasp.createContext(c.req.raw);
+
+        const encoder = new TextEncoder();
+        let closed = false;
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        let removeAbortListener: (() => void) | undefined;
+        let unsubscribe: (() => Promise<void>) | undefined;
+        let cleanup: (() => Promise<void>) | undefined;
+
         const stream = new ReadableStream({
-            start(controller) {
-                const encoder = new TextEncoder();
+            async start(controller) {
+                const enqueue = (chunk: string) => {
+                    if (closed) {
+                        return;
+                    }
+
+                    try {
+                        controller.enqueue(encoder.encode(chunk));
+                    } catch {
+                        void cleanup?.();
+                    }
+                };
 
                 const write = (event: string, data: unknown) => {
-                    controller.enqueue(
-                        encoder.encode(
-                            `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
-                        ),
+                    enqueue(
+                        `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
                     );
+                };
+
+                const writeComment = (comment: string) => {
+                    enqueue(`: ${comment}\n\n`);
+                };
+
+                cleanup = async () => {
+                    if (closed) {
+                        return;
+                    }
+
+                    closed = true;
+
+                    if (heartbeat) {
+                        clearInterval(heartbeat);
+                    }
+
+                    removeAbortListener?.();
+                    await unsubscribe?.();
+
+                    try {
+                        controller.close();
+                    } catch {
+                        // The stream may already be closed by the runtime.
+                    }
+                };
+
+                const handleAbort = () => {
+                    void cleanup?.();
+                };
+
+                c.req.raw.signal.addEventListener("abort", handleAbort);
+                removeAbortListener = () => {
+                    c.req.raw.signal.removeEventListener("abort", handleAbort);
                 };
 
                 write("klasp.connected", {
                     timestamp: Date.now(),
                 });
 
-                // Real implementation needs cleanup when request aborts.
+                heartbeat = setInterval(() => {
+                    writeComment("heartbeat");
+                }, 30_000);
+
+                unsubscribe =
+                    await options.klasp.realtime?.subscribeInvalidations(
+                        (event: KlaspInvalidationEvent) => {
+                            write("klasp.invalidate", event);
+                        },
+                    );
+            },
+            cancel() {
+                void cleanup?.();
             },
         });
 
@@ -83,6 +156,7 @@ export function klaspHandler(options: KlaspHonoHandlerOptions): Hono {
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 Connection: "keep-alive",
+                "X-Accel-Buffering": "no",
             },
         });
     });
