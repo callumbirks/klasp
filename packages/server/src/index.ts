@@ -2,6 +2,8 @@ import type {
     KlaspInvalidationEvent,
     KlaspLiveConfig,
     KlaspRealtimeAdapter,
+    KlaspRpcRequest,
+    KlaspRpcResponse,
 } from "@klasp/core";
 
 export interface KlaspContext {
@@ -53,6 +55,18 @@ export interface Klasp<TContext extends KlaspContext = KlaspContext> {
     realtime: KlaspRealtimeAdapter | undefined;
 }
 
+export type KlaspProcedureDefinition =
+    | KlaspQueryDefinition<unknown, unknown, unknown>
+    | KlaspMutationDefinition<unknown, unknown, unknown>;
+
+export type KlaspApi = Record<string, KlaspProcedureDefinition>;
+
+export interface CreateKlaspRpcResponseOptions {
+    klasp: Klasp;
+    api: KlaspApi;
+    request: Request;
+}
+
 export const KLASP_EVENTS_HEADERS = {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -61,6 +75,66 @@ export const KLASP_EVENTS_HEADERS = {
 } as const satisfies HeadersInit;
 
 export type KlaspEventsHeaders = typeof KLASP_EVENTS_HEADERS;
+
+const KLASP_JSON_HEADERS = {
+    "Content-Type": "application/json",
+} as const satisfies HeadersInit;
+
+function createJsonResponse(
+    body: KlaspRpcResponse<unknown>,
+    status = 200,
+): Response {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: KLASP_JSON_HEADERS,
+    });
+}
+
+export async function createKlaspRpcResponse(
+    options: CreateKlaspRpcResponseOptions,
+): Promise<Response> {
+    const request = (await options.request.json()) as KlaspRpcRequest<unknown>;
+    const procedure = options.api[request.path];
+
+    if (!procedure) {
+        return createJsonResponse(
+            {
+                ok: false,
+                data: undefined,
+                live: undefined,
+                error: {
+                    code: "NOT_FOUND",
+                    message: `Procedure '${request.path}' was not found.`,
+                },
+            },
+            404,
+        );
+    }
+
+    const input = procedure.parseInput
+        ? procedure.parseInput(request.input)
+        : request.input;
+
+    const ctx = await options.klasp.createContext(options.request);
+
+    const result = await procedure.handler({
+        input,
+        ctx,
+        klasp: options.klasp.runtime,
+    });
+
+    const live =
+        procedure.type === "query" && procedure.live
+            ? procedure.live({ input, ctx })
+            : undefined;
+
+    return createJsonResponse({
+        ok: true,
+        data: result,
+        live,
+        error: undefined,
+    });
+}
 
 export interface CreateKlaspEventsStreamOptions {
     realtime: KlaspRealtimeAdapter | undefined;

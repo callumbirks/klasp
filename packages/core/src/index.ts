@@ -47,7 +47,7 @@ export type KlaspRpcResponse<TOutput> =
     | {
           ok: true;
           data: TOutput;
-          live: KlaspLiveConfig;
+          live: KlaspLiveConfig | undefined;
           error: undefined;
       }
     | {
