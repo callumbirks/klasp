@@ -57,7 +57,7 @@ Klasp should make it easy to:
 4. Invalidate subscribed frontend queries when backend state changes.
 5. Avoid hand-written SSE/WebSocket plumbing in application code.
 6. Work with existing databases, ORMs, auth systems, and backend frameworks.
-7. Integrate cleanly with TanStack Query.
+7. Provide a client-agnostic core SDK with first-class integrations for pure React, TanStack Query, and Svelte.
 8. Support horizontally scaled backend instances through Redis.
 9. Start as a self-hosted library.
 10. Leave room for a hosted realtime gateway later.
@@ -113,7 +113,7 @@ Klasp is best understood as:
 - a type-safe backend procedure layer
 - a realtime invalidation layer
 - a client SDK
-- a TanStack Query integration
+- framework/client integrations for React, TanStack Query, Svelte, and later others
 - a Redis-backed coordination system
 
 It is not “just Pub/Sub”. The product value comes from connecting backend procedures, frontend cache invalidation, auth, and realtime delivery into one coherent programming model.
@@ -136,8 +136,7 @@ Klasp is for TypeScript developers building applications such as:
 
 The ideal early adopter:
 
-- uses React or Svelte
-- uses TanStack Query or similar
+- uses React, Svelte, TanStack Query, or similar frontend tooling
 - has an existing backend
 - has or can add Redis
 - wants realtime updates
@@ -165,7 +164,7 @@ Queries may declare live topics.
 
 Mutations may invalidate those topics.
 
-Clients subscribe to topics indirectly by running authorized queries. When a topic is invalidated, Klasp tells the client which cached queries to refresh.
+Clients subscribe to topics indirectly by running authorized queries. When a topic is invalidated, Klasp tells the client runtime which active query resources to refresh. Individual integrations decide whether that means updating React state, invalidating TanStack Query cache entries, refreshing Svelte stores, or using another client-specific mechanism.
 
 ### Server Example
 
@@ -214,17 +213,36 @@ export const api = klasp.router({
 });
 ```
 
-### Client Example
+### Client Examples
+
+Pure React:
 
 ```tsx
 const { data: messages } = useKlaspQuery(api.rooms.messages, { roomId });
-
 const sendMessage = useKlaspMutation(api.rooms.sendMessage);
+
+await sendMessage.mutate({ roomId, text });
+```
+
+TanStack Query:
+
+```tsx
+const messages = useKlaspTanStackQuery(api.rooms.messages, { roomId });
+const sendMessage = useKlaspTanStackMutation(api.rooms.sendMessage);
 
 await sendMessage.mutateAsync({ roomId, text });
 ```
 
-When `sendMessage` invalidates the room topic, every client currently using `api.rooms.messages` for that room refetches automatically.
+Svelte:
+
+```svelte
+<script lang="ts">
+  const messages = createKlaspQuery(api.rooms.messages, { roomId });
+  const sendMessage = createKlaspMutation(api.rooms.sendMessage);
+</script>
+```
+
+When `sendMessage` invalidates the room topic, every active client resource currently using `api.rooms.messages` for that room refreshes automatically, regardless of whether the app uses React state, TanStack Query, or Svelte stores.
 
 ---
 
@@ -232,9 +250,9 @@ When `sendMessage` invalidates the room topic, every client currently using `api
 
 ```txt
 Frontend
-  React / Svelte / Vue
-  TanStack Query
-  Klasp client SDK
+  React / TanStack Query / Svelte
+  Later: Vue / Solid / Next.js helpers
+  Klasp client runtime
         │
         │ HTTP queries/mutations
         │ SSE realtime stream
@@ -259,8 +277,8 @@ Backend
 3. Server validates input and builds auth context.
 4. Query handler runs user code.
 5. Result is returned to the client.
-6. TanStack Query stores the result.
-7. Klasp registers the query against its live topics.
+6. The active client integration stores the result.
+7. Klasp registers the active query resource against its live topics.
 
 ### Mutation + Invalidation Flow
 
@@ -271,8 +289,8 @@ Backend
 5. Klasp publishes the invalidation to Redis.
 6. All backend instances receive the invalidation.
 7. Each instance forwards it to relevant connected clients.
-8. Clients invalidate matching TanStack Query cache entries.
-9. Affected queries refetch.
+8. Clients refresh matching active query resources through the relevant integration.
+9. Affected queries refetch or update local state.
 
 ### Multi-Instance Support
 
@@ -300,7 +318,7 @@ Benefits:
 - database-agnostic
 - safe
 - easy to reason about
-- works naturally with TanStack Query
+- works with multiple client integrations
 - avoids patch complexity
 
 This is the right starting point.
@@ -463,25 +481,89 @@ Manual subscriptions should require explicit server-side authorization.
 
 ---
 
-## 13. Client Cache Strategy
+## 13. Client Runtime and Integrations
 
-Klasp should integrate with TanStack Query instead of replacing it.
+The core client should not be coupled to any one frontend cache library. It should manage protocol-level concerns:
 
-`useKlaspQuery` wraps `useQuery`:
+- procedure calls
+- SSE connection lifecycle
+- active query registry
+- query-to-topic mapping
+- invalidation dispatch
+- reconnect handling
+- deterministic resource keys
 
-```tsx
-const result = useKlaspQuery(api.rooms.messages, { roomId });
+Framework packages should adapt that runtime into native frontend primitives. This keeps the system extensible without forcing every app through TanStack Query just because one cache library had the decency to be popular.
+
+### Core Client Runtime
+
+`@klasp/client` should expose a low-level typed client:
+
+```ts
+const client = createKlaspClient<typeof api>({
+  endpoint: "/klasp",
+});
+
+const messages = await client.query(api.rooms.messages, { roomId });
+await client.mutation(api.rooms.sendMessage, { roomId, text });
+```
+
+The runtime should also expose subscription/resource primitives for integrations:
+
+```ts
+const resource = client.createQueryResource(api.rooms.messages, { roomId });
+
+resource.subscribe((state) => {
+  // integration updates React state, TanStack cache, Svelte store, etc.
+});
 ```
 
 Internally, Klasp maps:
 
 ```txt
-query key -> live topics
+resource key -> live topics
+live topic -> active resources
 ```
 
-When an invalidation arrives for a topic, Klasp invalidates every query key registered against that topic.
+When an invalidation arrives, the runtime asks affected resources to refresh.
 
-Klasp should expose deterministic query keys:
+### Pure React Integration
+
+`@klasp/react` should work without TanStack Query. It should be enough for small apps, examples, and users who do not want another cache dependency.
+
+```tsx
+const { data, error, status, refetch } = useKlaspQuery(api.rooms.messages, {
+  roomId,
+});
+
+const sendMessage = useKlaspMutation(api.rooms.sendMessage);
+```
+
+This integration can use React state internally. It should support:
+
+- loading/error/data state
+- refetch
+- mutation status
+- automatic realtime refresh
+- optional stale-time/dedupe controls later
+
+It does not need to become a full cache framework. Humanity already has enough of those.
+
+### TanStack Query Integration
+
+`@klasp/tanstack-query` should feel native for teams already using TanStack Query.
+
+```tsx
+const messages = useKlaspTanStackQuery(api.rooms.messages, { roomId });
+
+const sendMessage = useKlaspTanStackMutation(api.rooms.sendMessage, {
+  onSuccess: () => {
+    // normal TanStack Query options still work
+  },
+});
+```
+
+This adapter should expose deterministic query keys:
 
 ```ts
 api.rooms.messages.key({ roomId });
@@ -493,9 +575,33 @@ Example internal shape:
 ["klasp", "rooms.messages", { roomId }];
 ```
 
-Optimistic updates should be handled through normal TanStack Query options. Klasp should not reinvent that layer.
+When an invalidation arrives, the adapter calls `queryClient.invalidateQueries` for matching resources. Optimistic updates should remain TanStack Query’s job.
 
----
+### Svelte Integration
+
+`@klasp/svelte` should expose store-friendly primitives.
+
+```ts
+const messages = createKlaspQuery(api.rooms.messages, { roomId });
+const sendMessage = createKlaspMutation(api.rooms.sendMessage);
+```
+
+The query store should expose data, error, loading state, and refetch. Invalidations should refresh the store automatically.
+
+SvelteKit-specific helpers can come later, but the first Svelte integration should be framework-agnostic enough to work in normal Svelte apps.
+
+### Future Client Integrations
+
+Likely later integrations:
+
+- Vue
+- Solid
+- Next.js helpers
+- SvelteKit load/action helpers
+- React Server Components-aware helpers
+- non-TypeScript generated clients
+
+## Next.js should be treated mostly as deployment/framework glue around React and server routes, not as a separate client model at first.
 
 ## 14. API Surface
 
@@ -530,12 +636,32 @@ const app = new Hono();
 app.route("/klasp", klaspHandler({ klasp, api }));
 ```
 
-### Client Provider
+### Client Providers
+
+Pure React:
 
 ```tsx
-<KlaspProvider api={api} endpoint="/klasp" queryClient={queryClient}>
+<KlaspProvider api={api} endpoint="/klasp">
   <App />
 </KlaspProvider>
+```
+
+TanStack Query:
+
+```tsx
+<QueryClientProvider client={queryClient}>
+  <KlaspTanStackProvider api={api} endpoint="/klasp" queryClient={queryClient}>
+    <App />
+  </KlaspTanStackProvider>
+</QueryClientProvider>
+```
+
+Svelte:
+
+```ts
+const klasp = createKlaspSvelteClient<typeof api>({
+  endpoint: "/klasp",
+});
 ```
 
 ### Query
@@ -588,6 +714,8 @@ klasp/
     docs/
     examples/
       hono-react-chat/
+      hono-react-tanstack-chat/
+      hono-svelte-chat/
       hono-react-dashboard/
     devtools/
 
@@ -597,6 +725,7 @@ klasp/
     client/
     react/
     tanstack-query/
+    svelte/
     hono/
     redis/
     devtools-core/
@@ -608,16 +737,17 @@ klasp/
 
 Package responsibilities:
 
-| Package                 | Responsibility                              |
-| ----------------------- | ------------------------------------------- |
-| `@klasp/core`           | Shared types, errors, protocol definitions  |
-| `@klasp/server`         | Router, procedures, auth context, execution |
-| `@klasp/client`         | HTTP client, SSE client, event handling     |
-| `@klasp/react`          | React hooks                                 |
-| `@klasp/tanstack-query` | TanStack Query integration                  |
-| `@klasp/hono`           | Hono adapter                                |
-| `@klasp/redis`          | Redis adapter                               |
-| `@klasp/devtools-core`  | Shared devtools data/types                  |
+| Package                 | Responsibility                                  |
+| ----------------------- | ----------------------------------------------- |
+| `@klasp/core`           | Shared types, errors, protocol definitions      |
+| `@klasp/server`         | Router, procedures, auth context, execution     |
+| `@klasp/client`         | HTTP client, SSE client, event handling         |
+| `@klasp/react`          | Pure React hooks backed by Klasp client runtime |
+| `@klasp/tanstack-query` | TanStack Query adapter                          |
+| `@klasp/svelte`         | Svelte stores and mutation helpers              |
+| `@klasp/hono`           | Hono adapter                                    |
+| `@klasp/redis`          | Redis adapter                                   |
+| `@klasp/devtools-core`  | Shared devtools data/types                      |
 
 Dependency direction should stay clean:
 
@@ -626,7 +756,7 @@ core
   ↑
 server      client
   ↑           ↑
-hono        react / tanstack-query
+hono        react / tanstack-query / svelte
   ↑
 redis adapter plugs into server
 ```
@@ -654,11 +784,14 @@ Server:
 
 Client:
 
-- React SDK
+- framework-agnostic client runtime
+- pure React SDK
 - TanStack Query integration
-- `useKlaspQuery`
-- `useKlaspMutation`
-- query-key generation
+- Svelte integration
+- `useKlaspQuery` / `useKlaspMutation` for React
+- TanStack-specific query/mutation hooks
+- Svelte store/mutation helpers
+- deterministic resource/query-key generation
 - realtime invalidation handling
 - SSE reconnect support
 
@@ -670,7 +803,9 @@ Redis:
 
 Docs/examples:
 
-- Hono + React chat demo
+- Hono + pure React chat demo
+- Hono + React + TanStack Query chat demo
+- Hono + Svelte chat demo
 - Redis setup guide
 - auth guide
 - topic naming guide
@@ -693,7 +828,7 @@ Docs/examples:
 
 The MVP is:
 
-> **Type-safe queries and mutations, explicit live topics, Redis-backed invalidation, SSE delivery, and TanStack Query cache updates.**
+> **Type-safe queries and mutations, explicit live topics, Redis-backed invalidation, SSE delivery, and client-agnostic realtime refresh with first-class React, TanStack Query, and Svelte integrations.**
 
 ---
 
@@ -775,7 +910,7 @@ Mitigation:
 - realtime invalidation must be core from day one
 - no manual SSE setup in app code
 - automatic query-topic mapping
-- first-class TanStack Query integration
+- first-class React, TanStack Query, and Svelte integrations
 - devtools visibility
 
 ### Weak Differentiation from Convex
@@ -827,7 +962,7 @@ Recommendation: support imperative invalidation first. Add result helpers only i
 
 Should Klasp cache query results in Redis?
 
-Recommendation: no for MVP. TanStack Query owns client caching. The user’s database owns source-of-truth state.
+Recommendation: no for MVP. Client-side integrations own frontend state/caching. The user’s database owns source-of-truth state.
 
 ### Memory Adapter
 
@@ -849,7 +984,7 @@ Build the smallest proof:
 - HTTP procedure calls
 - SSE stream
 - Redis Pub/Sub invalidation
-- React hook invalidating TanStack Query
+- React hook refreshing client state, plus a TanStack Query adapter invalidating query cache
 
 Success criteria:
 
@@ -866,6 +1001,7 @@ Build:
 - `@klasp/client`
 - `@klasp/react`
 - `@klasp/tanstack-query`
+- `@klasp/svelte`
 - `@klasp/hono`
 - `@klasp/redis`
 
@@ -883,6 +1019,8 @@ Write docs for:
 - getting started
 - Hono setup
 - React setup
+- TanStack Query setup
+- Svelte setup
 - auth
 - Redis
 - deployment
@@ -915,12 +1053,12 @@ If the programming model proves useful, explore a hosted gateway for:
 
 Klasp is technically successful if:
 
-- developers can add realtime query invalidation in under 15 minutes
+- developers can add realtime query invalidation in under 15 minutes in React, TanStack Query, or Svelte
 - no custom SSE/WebSocket code is needed in application code
 - multi-tab realtime works
 - multi-instance backend fanout works through Redis
 - type inference feels tRPC-like
-- TanStack Query integration feels native
+- React, TanStack Query, and Svelte integrations feel native
 - auth and topic authorization are understandable
 - debugging realtime state is easier than manual setups
 
@@ -938,7 +1076,7 @@ Klasp is commercially promising if developers say:
 
 Build Klasp as:
 
-> **A TypeScript-first realtime API layer for existing backend apps, powered by Redis and integrated with TanStack Query.**
+> **A TypeScript-first realtime API layer for existing backend apps, powered by Redis and usable from multiple frontend clients.**
 
 The first version should focus narrowly on:
 
@@ -947,12 +1085,12 @@ The first version should focus narrowly on:
 3. explicit live topics
 4. Redis-backed invalidation
 5. SSE delivery
-6. TanStack Query cache updates
-7. React hooks
+6. client runtime query refresh
+7. React, TanStack Query, and Svelte integrations
 8. Hono backend adapter
 
 Do not start by building a database, ORM, hosting platform, sync engine, or full Convex competitor.
 
 The product should prove one thing first:
 
-> Developers can add reliable realtime updates to an existing TypeScript app without writing the usual pile of WebSocket/SSE/cache-invalidation glue.
+> Developers can add reliable realtime updates to an existing TypeScript app from multiple frontend clients without writing the usual pile of WebSocket/SSE/cache-invalidation glue.
