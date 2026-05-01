@@ -1,9 +1,7 @@
 {
-    "extends": "../../../tsconfig.base.json",
-    "compilerOptions": {
-        "jsx": "react-jsx",
-        "noEmit": true,
-        "types": ["vite/client"]
-    },
-    "include": ["src/client", "src/shared", "vite.config.ts"]
+    "files": [],
+    "references": [
+        { "path": "./tsconfig.client.json" },
+        { "path": "./tsconfig.server.json" }
+    ]
 }

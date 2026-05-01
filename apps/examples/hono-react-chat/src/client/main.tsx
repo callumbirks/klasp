@@ -1,8 +1,8 @@
 import { KlaspProvider } from "@klasp/react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { chatContract as api } from "../shared/chat";
 import { App } from "./App";
-import { chatContract as api } from "../shared/chat.js";
 import "./styles.css";
 
 const klaspEndpoint = import.meta.env.DEV

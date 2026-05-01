@@ -5,7 +5,7 @@ import type {
     chatContract,
     ListMessagesInput,
     SendMessageInput,
-} from "../shared/chat";
+} from "../shared/chat.js";
 
 const MAX_AUTHOR_LENGTH = 32;
 const MAX_TEXT_LENGTH = 500;

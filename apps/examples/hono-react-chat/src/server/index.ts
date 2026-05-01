@@ -4,8 +4,8 @@ import { serve } from "@hono/node-server";
 import { klaspHandler } from "@klasp/hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { createChatApi } from "./chatApi";
-import { createMemoryRealtimeAdapter } from "./realtime";
+import { createChatApi } from "./chatApi.js";
+import { createMemoryRealtimeAdapter } from "./realtime.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const clientDist = resolve(process.cwd(), "dist/client");
