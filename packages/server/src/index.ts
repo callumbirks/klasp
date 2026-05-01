@@ -98,42 +98,36 @@ export async function createKlaspRpcResponse(
     const procedure = options.api[request.path];
 
     if (!procedure) {
-        return createJsonResponse(
-            {
-                ok: false,
-                data: undefined,
-                live: undefined,
-                error: {
-                    code: "NOT_FOUND",
-                    message: `Procedure '${request.path}' was not found.`,
-                },
+        return createJsonResponse({
+            ok: false,
+            data: undefined,
+            live: undefined,
+            error: {
+                code: "NOT_FOUND",
+                message: `Procedure '${request.path}' was not found.`,
             },
-            404,
-        );
+        });
     }
 
     if (request.type !== procedure.type) {
-        return createJsonResponse(
-            {
-                ok: false,
-                data: undefined,
-                live: undefined,
-                error: {
-                    code: "BAD_REQUEST",
-                    message: `Procedure '${request.path}' is a ${procedure.type} but the request is a ${request.type}.`,
-                },
+        return createJsonResponse({
+            ok: false,
+            data: undefined,
+            live: undefined,
+            error: {
+                code: "BAD_REQUEST",
+                message: `Procedure '${request.path}' is a ${procedure.type} but the request is a ${request.type}.`,
             },
-            400,
-        );
+        });
     }
 
-    const input = procedure.parseInput
-        ? procedure.parseInput(request.input)
-        : request.input;
-
-    const ctx = await options.klasp.createContext(options.request);
-
     try {
+        const input = procedure.parseInput
+            ? procedure.parseInput(request.input)
+            : request.input;
+
+        const ctx = await options.klasp.createContext(options.request);
+
         const result = await procedure.handler({
             input,
             ctx,
@@ -157,7 +151,11 @@ export async function createKlaspRpcResponse(
                 ok: false,
                 data: undefined,
                 live: undefined,
-                error,
+                error: {
+                    code: error.code,
+                    message: error.message,
+                    details: error.details,
+                },
             });
         }
         return createJsonResponse({
