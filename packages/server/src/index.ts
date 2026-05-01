@@ -111,6 +111,21 @@ export async function createKlaspRpcResponse(
         );
     }
 
+    if (request.type !== procedure.type) {
+        return createJsonResponse(
+            {
+                ok: false,
+                data: undefined,
+                live: undefined,
+                error: {
+                    code: "BAD_REQUEST",
+                    message: `Procedure '${request.path}' is a ${procedure.type} but the request is a ${request.type}.`,
+                },
+            },
+            400,
+        );
+    }
+
     const input = procedure.parseInput
         ? procedure.parseInput(request.input)
         : request.input;

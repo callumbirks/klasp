@@ -1,15 +1,8 @@
-import type { KlaspRpcRequest } from "@klasp/core";
+import type { KlaspRpcRequest, KlaspRpcResponse } from "@klasp/core";
 
 export interface CreateKlaspClientOptions {
     endpoint: string;
     fetch?: typeof fetch;
-}
-
-export interface KlaspCallResponse<TData> {
-    data: TData;
-    live?: {
-        topics: string[];
-    };
 }
 
 export function createKlaspClient(options: CreateKlaspClientOptions) {
@@ -19,7 +12,7 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
         type: "query" | "mutation",
         path: string,
         input: TInput,
-    ): Promise<KlaspCallResponse<TOutput>> => {
+    ): Promise<KlaspRpcResponse<TOutput>> => {
         const request: KlaspRpcRequest<TInput> = {
             version: 1,
             type,
@@ -38,7 +31,9 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
             throw new Error(`Klasp call failed: ${response.status}`);
         }
 
-        return response.json() as Promise<KlaspCallResponse<TOutput>>;
+        const data = (await response.json()) as KlaspRpcResponse<TOutput>;
+
+        return data;
     };
 
     return {
