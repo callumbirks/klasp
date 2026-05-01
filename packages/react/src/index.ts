@@ -1,8 +1,19 @@
 import {
     type CreateKlaspClientOptions,
     createKlaspClient,
+    createKlaspInvalidationRegistry,
+    createKlaspProcedurePathMap,
+    getKlaspProcedurePath,
+    type KlaspMutationProcedure,
+    type KlaspProcedureInput,
+    type KlaspProcedureOutput,
+    type KlaspQueryProcedure,
+    type KlaspQueryResource,
+    stableSerialize,
+    toError,
+    unwrapKlaspResponse,
 } from "@klasp/client";
-import { KlaspError, type KlaspRpcResponse } from "@klasp/core";
+import type { KlaspRpcResponse } from "@klasp/core";
 import {
     createContext,
     createElement,
@@ -16,6 +27,13 @@ import {
     useRef,
     useState,
 } from "react";
+
+export type {
+    KlaspMutationProcedure,
+    KlaspProcedureInput,
+    KlaspProcedureOutput,
+    KlaspQueryProcedure,
+} from "@klasp/client";
 
 export type KlaspQueryStatus = "idle" | "loading" | "success" | "error";
 export type KlaspMutationStatus = "idle" | "loading" | "success" | "error";
@@ -52,43 +70,13 @@ export interface UseKlaspMutationResult<TInput, TData> {
     reset: () => void;
 }
 
-export type KlaspQueryProcedure = {
-    type: "query";
-    handler: unknown;
-};
-
-export type KlaspMutationProcedure = {
-    type: "mutation";
-    handler: unknown;
-};
-
-export type KlaspProcedureInput<TProcedure> = TProcedure extends {
-    handler: (args: infer TArgs) => unknown;
-}
-    ? TArgs extends { input: infer TInput }
-        ? TInput
-        : never
-    : never;
-
-export type KlaspProcedureOutput<TProcedure> = TProcedure extends {
-    handler: (args: infer _TArgs) => infer TResult;
-}
-    ? Awaited<TResult>
-    : never;
-
-interface QueryResource {
-    id: string;
-    topics: string[];
-    refresh: () => Promise<unknown>;
-}
-
 interface KlaspReactContextValue {
     client: ReturnType<typeof createKlaspClient>;
     getProcedurePath: (
         procedure: string | KlaspQueryProcedure | KlaspMutationProcedure,
         type: "query" | "mutation",
     ) => string;
-    registerQueryResource: (resource: QueryResource) => void;
+    registerQueryResource: (resource: KlaspQueryResource) => void;
     unregisterQueryResource: (id: string) => void;
 }
 
@@ -100,9 +88,14 @@ export function KlaspProvider<TApi extends Record<string, unknown>>({
     fetch,
     children,
 }: KlaspProviderProps<TApi>): ReactElement {
-    const procedurePaths = useMemo(() => createProcedurePathMap(api), [api]);
-    const resourcesByIdRef = useRef(new Map<string, QueryResource>());
-    const resourcesByTopicRef = useRef(new Map<string, Set<string>>());
+    const procedurePaths = useMemo(
+        () => createKlaspProcedurePathMap(api),
+        [api],
+    );
+    const invalidationRegistry = useMemo(
+        () => createKlaspInvalidationRegistry(),
+        [],
+    );
 
     const client = useMemo(() => {
         if (fetch) {
@@ -112,84 +105,24 @@ export function KlaspProvider<TApi extends Record<string, unknown>>({
         return createKlaspClient({ endpoint });
     }, [endpoint, fetch]);
 
-    const unregisterQueryResource = useCallback((id: string) => {
-        const previous = resourcesByIdRef.current.get(id);
-        if (!previous) {
-            return;
-        }
-
-        for (const topic of previous.topics) {
-            const ids = resourcesByTopicRef.current.get(topic);
-            ids?.delete(id);
-
-            if (ids?.size === 0) {
-                resourcesByTopicRef.current.delete(topic);
-            }
-        }
-
-        resourcesByIdRef.current.delete(id);
-    }, []);
-
-    const registerQueryResource = useCallback(
-        (resource: QueryResource) => {
-            unregisterQueryResource(resource.id);
-            resourcesByIdRef.current.set(resource.id, resource);
-
-            for (const topic of resource.topics) {
-                const ids =
-                    resourcesByTopicRef.current.get(topic) ?? new Set<string>();
-                ids.add(resource.id);
-                resourcesByTopicRef.current.set(topic, ids);
-            }
-        },
-        [unregisterQueryResource],
-    );
+    const unregisterQueryResource = invalidationRegistry.unregister;
+    const registerQueryResource = invalidationRegistry.register;
 
     const getProcedurePath = useCallback(
         (
             procedure: string | KlaspQueryProcedure | KlaspMutationProcedure,
             type: "query" | "mutation",
         ): string => {
-            if (typeof procedure === "string") {
-                return procedure;
-            }
-
-            if (procedure.type !== type) {
-                throw new Error(
-                    `Expected a Klasp ${type} procedure, received a ${procedure.type} procedure.`,
-                );
-            }
-
-            const path = procedurePaths.get(procedure);
-            if (!path) {
-                throw new Error(
-                    "Klasp procedure was not found in the KlaspProvider api tree.",
-                );
-            }
-
-            return path;
+            return getKlaspProcedurePath(procedure, type, procedurePaths);
         },
         [procedurePaths],
     );
 
     useEffect(() => {
-        return client.connectEvents((message) => {
-            const event = parseInvalidationEvent(message);
-            if (!event) {
-                return;
-            }
-
-            const resourceIds = resourcesByTopicRef.current.get(event.topic);
-            if (!resourceIds) {
-                return;
-            }
-
-            for (const resourceId of resourceIds) {
-                const resource = resourcesByIdRef.current.get(resourceId);
-                void resource?.refresh();
-            }
+        return client.connectInvalidations((event) => {
+            invalidationRegistry.invalidate(event.topic);
         });
-    }, [client]);
+    }, [client, invalidationRegistry]);
 
     const value = useMemo<KlaspReactContextValue>(
         () => ({
@@ -439,110 +372,4 @@ function useRequiredKlaspContext(): KlaspReactContextValue {
     }
 
     return context;
-}
-
-function createProcedurePathMap(api: Record<string, unknown>) {
-    const paths = new WeakMap<object, string>();
-
-    const visit = (value: unknown, segments: string[]) => {
-        if (!value || typeof value !== "object") {
-            return;
-        }
-
-        if (isKlaspProcedure(value)) {
-            paths.set(value, segments.join("."));
-            return;
-        }
-
-        if (Array.isArray(value)) {
-            return;
-        }
-
-        for (const [key, child] of Object.entries(value)) {
-            visit(child, [...segments, key]);
-        }
-    };
-
-    visit(api, []);
-
-    return paths;
-}
-
-function isKlaspProcedure(
-    value: object,
-): value is KlaspQueryProcedure | KlaspMutationProcedure {
-    return (
-        "type" in value &&
-        (value.type === "query" || value.type === "mutation") &&
-        "handler" in value
-    );
-}
-
-function parseInvalidationEvent(
-    message: MessageEvent,
-): { topic: string } | null {
-    if (typeof message.data !== "string") {
-        return null;
-    }
-
-    try {
-        const data = JSON.parse(message.data) as unknown;
-        if (
-            data &&
-            typeof data === "object" &&
-            "topic" in data &&
-            typeof data.topic === "string"
-        ) {
-            return { topic: data.topic };
-        }
-    } catch {
-        return null;
-    }
-
-    return null;
-}
-
-function unwrapKlaspResponse<TData>(response: KlaspRpcResponse<TData>): TData {
-    if (response.ok) {
-        return response.data;
-    }
-
-    throw new KlaspError(
-        response.error.code,
-        response.error.message,
-        response.error.details,
-    );
-}
-
-function toError(error: unknown): Error {
-    return error instanceof Error ? error : new Error(String(error));
-}
-
-function stableSerialize(value: unknown): string {
-    try {
-        return (
-            JSON.stringify(value, (_key, child) => {
-                if (!isPlainObject(child)) {
-                    return child;
-                }
-
-                return Object.keys(child)
-                    .sort()
-                    .reduce<Record<string, unknown>>((result, key) => {
-                        result[key] = (child as Record<string, unknown>)[key];
-                        return result;
-                    }, {});
-            }) ?? "undefined"
-        );
-    } catch {
-        return String(value);
-    }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-    return (
-        typeof value === "object" &&
-        value !== null &&
-        Object.getPrototypeOf(value) === Object.prototype
-    );
 }
