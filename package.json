@@ -6,7 +6,7 @@
     "type": "module",
     "scripts": {
         "build": "turbo build",
-        "dev": "turbo dev",
+        "dev": "turbo dev --filter=!./apps/examples/*",
         "test": "turbo test",
         "typecheck": "turbo typecheck",
         "lint": "turbo lint",
