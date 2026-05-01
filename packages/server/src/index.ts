@@ -1,9 +1,10 @@
-import type {
-    KlaspInvalidationEvent,
-    KlaspLiveConfig,
-    KlaspRealtimeAdapter,
-    KlaspRpcRequest,
-    KlaspRpcResponse,
+import {
+    KlaspError,
+    type KlaspInvalidationEvent,
+    type KlaspLiveConfig,
+    type KlaspRealtimeAdapter,
+    type KlaspRpcRequest,
+    type KlaspRpcResponse,
 } from "@klasp/core";
 
 export interface KlaspContext {
@@ -132,23 +133,43 @@ export async function createKlaspRpcResponse(
 
     const ctx = await options.klasp.createContext(options.request);
 
-    const result = await procedure.handler({
-        input,
-        ctx,
-        klasp: options.klasp.runtime,
-    });
+    try {
+        const result = await procedure.handler({
+            input,
+            ctx,
+            klasp: options.klasp.runtime,
+        });
 
-    const live =
-        procedure.type === "query" && procedure.live
-            ? procedure.live({ input, ctx })
-            : undefined;
+        const live =
+            procedure.type === "query" && procedure.live
+                ? procedure.live({ input, ctx })
+                : undefined;
 
-    return createJsonResponse({
-        ok: true,
-        data: result,
-        live,
-        error: undefined,
-    });
+        return createJsonResponse({
+            ok: true,
+            data: result,
+            live,
+            error: undefined,
+        });
+    } catch (error) {
+        if (error instanceof KlaspError) {
+            return createJsonResponse({
+                ok: false,
+                data: undefined,
+                live: undefined,
+                error,
+            });
+        }
+        return createJsonResponse({
+            ok: false,
+            data: undefined,
+            live: undefined,
+            error: {
+                code: "INTERNAL_SERVER_ERROR",
+                message: `Internal server error: ${error}`,
+            },
+        });
+    }
 }
 
 export interface CreateKlaspEventsStreamOptions {
