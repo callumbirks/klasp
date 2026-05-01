@@ -4,8 +4,8 @@ import { serve } from "@hono/node-server";
 import { klaspHandler } from "@klasp/hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { createChatApi } from "./chatApi.js";
-import { createMemoryRealtimeAdapter } from "./realtime.js";
+import { createChatApi } from "./chatApi";
+import { createMemoryRealtimeAdapter } from "./realtime";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const clientDist = resolve(process.cwd(), "dist/client");
@@ -127,7 +127,7 @@ function contentTypeFor(path: string): string {
             return "text/css; charset=utf-8";
         case ".html":
             return "text/html; charset=utf-8";
-        case ".js":
+        case "":
             return "text/javascript; charset=utf-8";
         case ".json":
             return "application/json; charset=utf-8";

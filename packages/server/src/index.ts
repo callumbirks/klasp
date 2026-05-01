@@ -88,6 +88,9 @@ export interface Klasp<TContext extends KlaspContext = KlaspContext> {
     router<TContract extends KlaspRouterContract>(
         procedures: KlaspRouterImplementation<TContract, TContext>,
     ): KlaspRouterImplementation<TContract, TContext>;
+    router<TProcedures extends Record<string, unknown>>(
+        procedures: TProcedures,
+    ): TProcedures;
     createContext(request: Request): Promise<TContext>;
     runtime: KlaspRuntime;
     realtime: KlaspRealtimeAdapter | undefined;
@@ -376,9 +379,9 @@ export function createKlasp<TContext extends KlaspContext = KlaspContext>(
             };
         },
 
-        router<TContract extends KlaspRouterContract>(
-            procedures: KlaspRouterImplementation<TContract, TContext>,
-        ): KlaspRouterImplementation<TContract, TContext> {
+        router<TProcedures extends Record<string, unknown>>(
+            procedures: TProcedures,
+        ): TProcedures {
             return procedures;
         },
 
