@@ -1,8 +1,4 @@
-import type {
-    KlaspErrorCode,
-    KlaspRpcRequest,
-    KlaspRpcResponse,
-} from "@klasp/core";
+import type { KlaspRpcRequest, KlaspRpcResponse } from "@klasp/core";
 
 export interface CreateKlaspClientOptions {
     endpoint: string;
@@ -31,6 +27,8 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
             body: JSON.stringify(request),
         });
 
+        // Klasp server will always return a 200 status code, even if the request is invalid.
+        // So this is a HTTP failure.
         if (!response.ok) {
             throw new Error(`Klasp call failed: ${response.status}`);
         }
