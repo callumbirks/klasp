@@ -1,7 +1,7 @@
 import { useKlaspMutation, useKlaspQuery } from "@klasp/react";
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
-import { api } from "./klasp.js";
+import { chatContract as api } from "../shared/chat";
 
 const ROOM_ID = "general";
 

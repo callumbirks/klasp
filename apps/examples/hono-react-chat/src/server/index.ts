@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server";
 import { klaspHandler } from "@klasp/hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { createChatApi } from "../shared/chat.js";
+import { createChatApi } from "./chatApi.js";
 import { createMemoryRealtimeAdapter } from "./realtime.js";
 
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);

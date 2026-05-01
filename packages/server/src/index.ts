@@ -1,8 +1,11 @@
 import {
+    KLASP_PROCEDURE_DESCRIPTOR,
     KlaspError,
     type KlaspInvalidationEvent,
     type KlaspLiveConfig,
+    type KlaspProcedureDescriptor,
     type KlaspRealtimeAdapter,
+    type KlaspRouterContract,
     type KlaspRpcRequest,
     type KlaspRpcResponse,
 } from "@klasp/core";
@@ -16,7 +19,8 @@ export interface CreateKlaspOptions<TContext extends KlaspContext> {
     realtime?: KlaspRealtimeAdapter;
 }
 
-export interface KlaspQueryDefinition<TInput, TOutput, TContext> {
+export interface KlaspQueryDefinition<TInput, TOutput, TContext>
+    extends KlaspProcedureDescriptor<"query", TInput, TOutput> {
     type: "query";
     parseInput?: (input: unknown) => TInput;
     handler: (input: {
@@ -27,7 +31,8 @@ export interface KlaspQueryDefinition<TInput, TOutput, TContext> {
     live?: (input: { input: TInput; ctx: TContext }) => KlaspLiveConfig;
 }
 
-export interface KlaspMutationDefinition<TInput, TOutput, TContext> {
+export interface KlaspMutationDefinition<TInput, TOutput, TContext>
+    extends KlaspProcedureDescriptor<"mutation", TInput, TOutput> {
     type: "mutation";
     parseInput?: (input: unknown) => TInput;
     handler: (input: {
@@ -41,13 +46,48 @@ export interface KlaspRuntime {
     invalidate(topic: string): Promise<void>;
 }
 
+export type KlaspQueryOptions<TInput, TOutput, TContext> = Omit<
+    KlaspQueryDefinition<TInput, TOutput, TContext>,
+    "type" | typeof KLASP_PROCEDURE_DESCRIPTOR
+> & {
+    type?: "query";
+};
+
+export type KlaspMutationOptions<TInput, TOutput, TContext> = Omit<
+    KlaspMutationDefinition<TInput, TOutput, TContext>,
+    "type" | typeof KLASP_PROCEDURE_DESCRIPTOR
+> & {
+    type?: "mutation";
+};
+
+export type KlaspRouterImplementation<TContract, TContext> =
+    TContract extends KlaspProcedureDescriptor<
+        infer TType,
+        infer TInput,
+        infer TOutput
+    >
+        ? TType extends "query"
+            ? KlaspQueryDefinition<TInput, TOutput, TContext>
+            : KlaspMutationDefinition<TInput, TOutput, TContext>
+        : TContract extends Record<string, unknown>
+          ? {
+                [TKey in keyof TContract]: KlaspRouterImplementation<
+                    TContract[TKey],
+                    TContext
+                >;
+            }
+          : never;
+
 export interface Klasp<TContext extends KlaspContext = KlaspContext> {
     query<TInput, TOutput>(
-        definition: KlaspQueryDefinition<TInput, TOutput, TContext>,
+        definition: KlaspQueryOptions<TInput, TOutput, TContext>,
     ): KlaspQueryDefinition<TInput, TOutput, TContext>;
     mutation<TInput, TOutput>(
-        definition: KlaspMutationDefinition<TInput, TOutput, TContext>,
+        definition: KlaspMutationOptions<TInput, TOutput, TContext>,
     ): KlaspMutationDefinition<TInput, TOutput, TContext>;
+    router<TContract extends KlaspRouterContract>(
+        procedures: KlaspRouterImplementation<TContract, TContext>,
+    ): KlaspRouterImplementation<TContract, TContext>;
     router<TProcedures extends Record<string, unknown>>(
         procedures: TProcedures,
     ): TProcedures;
@@ -320,24 +360,20 @@ export function createKlasp<TContext extends KlaspContext = KlaspContext>(
 
     return {
         query<TInput, TOutput>(
-            definition: Omit<
-                KlaspQueryDefinition<TInput, TOutput, TContext>,
-                "type"
-            >,
+            definition: KlaspQueryOptions<TInput, TOutput, TContext>,
         ): KlaspQueryDefinition<TInput, TOutput, TContext> {
             return {
+                [KLASP_PROCEDURE_DESCRIPTOR]: true,
                 type: "query",
                 ...definition,
             };
         },
 
         mutation<TInput, TOutput>(
-            definition: Omit<
-                KlaspMutationDefinition<TInput, TOutput, TContext>,
-                "type"
-            >,
+            definition: KlaspMutationOptions<TInput, TOutput, TContext>,
         ): KlaspMutationDefinition<TInput, TOutput, TContext> {
             return {
+                [KLASP_PROCEDURE_DESCRIPTOR]: true,
                 type: "mutation",
                 ...definition,
             };

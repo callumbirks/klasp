@@ -1,5 +1,7 @@
 import {
+    KLASP_PROCEDURE_DESCRIPTOR,
     KlaspError,
+    type KlaspProcedureDescriptor,
     type KlaspRpcRequest,
     type KlaspRpcResponse,
 } from "@klasp/core";
@@ -9,29 +11,47 @@ export interface CreateKlaspClientOptions {
     fetch?: typeof fetch;
 }
 
-export type KlaspQueryProcedure = {
+export type KlaspLegacyQueryProcedure = {
     type: "query";
     handler: unknown;
 };
 
-export type KlaspMutationProcedure = {
+export type KlaspLegacyMutationProcedure = {
     type: "mutation";
     handler: unknown;
 };
 
+export type KlaspQueryProcedure<TInput = unknown, TOutput = unknown> =
+    | KlaspProcedureDescriptor<"query", TInput, TOutput>
+    | KlaspLegacyQueryProcedure;
+
+export type KlaspMutationProcedure<TInput = unknown, TOutput = unknown> =
+    | KlaspProcedureDescriptor<"mutation", TInput, TOutput>
+    | KlaspLegacyMutationProcedure;
+
 export type KlaspProcedureInput<TProcedure> = TProcedure extends {
-    handler: (args: infer TArgs) => unknown;
+    readonly [KLASP_PROCEDURE_DESCRIPTOR]: true;
+    readonly __input?: infer TInput;
 }
-    ? TArgs extends { input: infer TInput }
-        ? TInput
-        : never
-    : never;
+    ? TInput
+    : TProcedure extends {
+            handler: (args: infer TArgs) => unknown;
+        }
+      ? TArgs extends { input: infer TInput }
+          ? TInput
+          : never
+      : never;
 
 export type KlaspProcedureOutput<TProcedure> = TProcedure extends {
-    handler: (args: infer _TArgs) => infer TResult;
+    readonly [KLASP_PROCEDURE_DESCRIPTOR]: true;
+    readonly __output?: infer TOutput;
 }
-    ? Awaited<TResult>
-    : never;
+    ? TOutput
+    : TProcedure extends {
+            handler: (args: infer _TArgs) => infer TResult;
+        }
+      ? Awaited<TResult>
+      : never;
 
 export interface KlaspQueryResource {
     id: string;
@@ -210,10 +230,15 @@ export function createKlaspInvalidationRegistry() {
 export function isKlaspProcedure(
     value: object,
 ): value is KlaspQueryProcedure | KlaspMutationProcedure {
-    return (
+    const isProcedureType =
         "type" in value &&
-        (value.type === "query" || value.type === "mutation") &&
-        "handler" in value
+        (value.type === "query" || value.type === "mutation");
+
+    return (
+        isProcedureType &&
+        ((KLASP_PROCEDURE_DESCRIPTOR in value &&
+            value[KLASP_PROCEDURE_DESCRIPTOR] === true) ||
+            "handler" in value)
     );
 }
 
