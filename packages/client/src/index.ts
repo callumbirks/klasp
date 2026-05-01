@@ -1,8 +1,33 @@
-import type { KlaspRpcRequest, KlaspRpcResponse } from "@klasp/core";
+import type {
+    KlaspErrorCode,
+    KlaspRpcRequest,
+    KlaspRpcResponse,
+} from "@klasp/core";
 
 export interface CreateKlaspClientOptions {
     endpoint: string;
     fetch?: typeof fetch;
+}
+
+export function getKlaspErrorCode(status: number): KlaspErrorCode {
+    switch (status) {
+        case 404:
+            return "NOT_FOUND";
+        case 400:
+            return "BAD_REQUEST";
+        case 401:
+            return "UNAUTHORIZED";
+        case 403:
+            return "FORBIDDEN";
+        case 409:
+            return "CONFLICT";
+        case 429:
+            return "RATE_LIMITED";
+        case 500:
+            return "INTERNAL_SERVER_ERROR";
+        default:
+            return "INTERNAL_SERVER_ERROR";
+    }
 }
 
 export function createKlaspClient(options: CreateKlaspClientOptions) {
@@ -28,7 +53,15 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
         });
 
         if (!response.ok) {
-            throw new Error(`Klasp call failed: ${response.status}`);
+            return {
+                ok: false,
+                error: {
+                    code: getKlaspErrorCode(response.status),
+                    message: `Klasp call failed: ${response.status}`,
+                },
+                data: undefined,
+                live: undefined,
+            };
         }
 
         const data = (await response.json()) as KlaspRpcResponse<TOutput>;
