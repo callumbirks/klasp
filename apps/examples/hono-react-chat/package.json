@@ -1,0 +1,32 @@
+{
+    "name": "hono-react-chat",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "concurrently -k -n server,client \"tsx watch src/server/index.ts\" \"vite --host 0.0.0.0\"",
+        "build": "vite build --outDir dist/client && tsc -p tsconfig.server.json",
+        "preview": "node dist/server/server/index.js",
+        "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+        "lint": "biome check ."
+    },
+    "dependencies": {
+        "@hono/node-server": "^2.0.1",
+        "@klasp/core": "workspace:*",
+        "@klasp/hono": "workspace:*",
+        "@klasp/react": "workspace:*",
+        "@klasp/server": "workspace:*",
+        "hono": "^4.12.16",
+        "react": "^19.2.5",
+        "react-dom": "^19.2.5"
+    },
+    "devDependencies": {
+        "@types/node": "^25.6.0",
+        "@types/react": "^19.2.14",
+        "@types/react-dom": "^19.2.3",
+        "@vitejs/plugin-react": "^6.0.1",
+        "concurrently": "^9.2.1",
+        "tsx": "^4.21.0",
+        "vite": "^8.0.10"
+    }
+}
