@@ -23,23 +23,23 @@ export interface KlaspQueryDefinition<TInput, TOutput, TContext>
     extends KlaspProcedureDescriptor<"query", TInput, TOutput> {
     type: "query";
     parseInput?: (input: unknown) => TInput;
-    handler: (input: {
+    handler(input: {
         input: TInput;
         ctx: TContext;
         klasp: KlaspRuntime;
-    }) => Promise<TOutput> | TOutput;
-    live?: (input: { input: TInput; ctx: TContext }) => KlaspLiveConfig;
+    }): Promise<TOutput> | TOutput;
+    live?(input: { input: TInput; ctx: TContext }): KlaspLiveConfig;
 }
 
 export interface KlaspMutationDefinition<TInput, TOutput, TContext>
     extends KlaspProcedureDescriptor<"mutation", TInput, TOutput> {
     type: "mutation";
     parseInput?: (input: unknown) => TInput;
-    handler: (input: {
+    handler(input: {
         input: TInput;
         ctx: TContext;
         klasp: KlaspRuntime;
-    }) => Promise<TOutput> | TOutput;
+    }): Promise<TOutput> | TOutput;
 }
 
 export interface KlaspRuntime {
@@ -100,7 +100,9 @@ export type KlaspProcedureDefinition =
     | KlaspQueryDefinition<unknown, unknown, unknown>
     | KlaspMutationDefinition<unknown, unknown, unknown>;
 
-export type KlaspApi = Record<string, unknown>;
+export type KlaspApi = {
+    readonly [key: string]: KlaspProcedureDefinition | KlaspApi;
+};
 
 export interface CreateKlaspRpcResponseOptions {
     klasp: Klasp;
