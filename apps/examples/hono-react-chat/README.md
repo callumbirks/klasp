@@ -13,6 +13,8 @@ pnpm --filter hono-react-chat dev
 
 Open <http://localhost:5173> in two browser tabs. Send a message in one tab and the other tab should refresh automatically.
 
+In development, Vite serves the React app from port `5173` and the Hono server listens on port `8787`. The React app calls `http://localhost:8787/klasp` directly so the SSE stream does not go through Vite's HTTP proxy.
+
 ## How It Works
 
 - The Hono server mounts Klasp at `/klasp`, which exposes `/klasp/rpc` and `/klasp/events`.

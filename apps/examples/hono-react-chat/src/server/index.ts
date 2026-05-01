@@ -3,6 +3,7 @@ import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { serve } from "@hono/node-server";
 import { klaspHandler } from "@klasp/hono";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { createChatApi } from "../shared/chat.js";
 import { createMemoryRealtimeAdapter } from "./realtime.js";
 
@@ -13,6 +14,12 @@ const { klasp, flatApi } = createChatApi(realtime);
 
 const app = new Hono();
 
+app.use(
+    "/klasp/*",
+    cors({
+        origin: "http://localhost:5173",
+    }),
+);
 app.route("/klasp", klaspHandler({ klasp, api: flatApi }));
 
 app.get("/health", (c) =>
