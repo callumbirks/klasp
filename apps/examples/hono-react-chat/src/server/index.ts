@@ -10,7 +10,7 @@ import { createMemoryRealtimeAdapter } from "./realtime.js";
 const PORT = Number.parseInt(process.env.PORT ?? "8787", 10);
 const clientDist = resolve(process.cwd(), "dist/client");
 const realtime = createMemoryRealtimeAdapter();
-const { klasp, flatApi } = createChatApi(realtime);
+const { klasp, api } = createChatApi(realtime);
 
 const app = new Hono();
 
@@ -20,7 +20,7 @@ app.use(
         origin: "http://localhost:5173",
     }),
 );
-app.route("/klasp", klaspHandler({ klasp, api: flatApi }));
+app.route("/klasp", klaspHandler({ klasp, api }));
 
 app.get("/health", (c) =>
     c.json({

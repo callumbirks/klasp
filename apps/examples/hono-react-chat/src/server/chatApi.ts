@@ -1,5 +1,5 @@
 import { KlaspError, type KlaspRealtimeAdapter } from "@klasp/core";
-import { createKlasp, type KlaspApi } from "@klasp/server";
+import { createKlasp } from "@klasp/server";
 import type {
     ChatMessage,
     chatContract,
@@ -64,10 +64,6 @@ export function createChatApi(realtime?: KlaspRealtimeAdapter) {
     return {
         klasp,
         api,
-        flatApi: {
-            "chat.listMessages": api.chat.listMessages,
-            "chat.sendMessage": api.chat.sendMessage,
-        } as unknown as KlaspApi,
     };
 }
 

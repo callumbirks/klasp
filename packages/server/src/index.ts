@@ -100,7 +100,7 @@ export type KlaspProcedureDefinition =
     | KlaspQueryDefinition<unknown, unknown, unknown>
     | KlaspMutationDefinition<unknown, unknown, unknown>;
 
-export type KlaspApi = Record<string, KlaspProcedureDefinition>;
+export type KlaspApi = Record<string, unknown>;
 
 export interface CreateKlaspRpcResponseOptions {
     klasp: Klasp;
@@ -121,6 +121,11 @@ const KLASP_JSON_HEADERS = {
     "Content-Type": "application/json",
 } as const satisfies HeadersInit;
 
+const apiProcedureMapCache = new WeakMap<
+    KlaspApi,
+    ReadonlyMap<string, KlaspProcedureDefinition>
+>();
+
 function createJsonResponse(
     body: KlaspRpcResponse<unknown>,
     status = 200,
@@ -135,7 +140,7 @@ export async function createKlaspRpcResponse(
     options: CreateKlaspRpcResponseOptions,
 ): Promise<Response> {
     const request = (await options.request.json()) as KlaspRpcRequest<unknown>;
-    const procedure = options.api[request.path];
+    const procedure = getKlaspApiProcedureMap(options.api).get(request.path);
 
     if (!procedure) {
         return createJsonResponse({
@@ -208,6 +213,60 @@ export async function createKlaspRpcResponse(
             },
         });
     }
+}
+
+function getKlaspApiProcedureMap(
+    api: KlaspApi,
+): ReadonlyMap<string, KlaspProcedureDefinition> {
+    const cached = apiProcedureMapCache.get(api);
+
+    if (cached) {
+        return cached;
+    }
+
+    const procedures = new Map<string, KlaspProcedureDefinition>();
+
+    visitKlaspApiTree(api, [], procedures);
+    apiProcedureMapCache.set(api, procedures);
+
+    return procedures;
+}
+
+function visitKlaspApiTree(
+    value: unknown,
+    segments: string[],
+    procedures: Map<string, KlaspProcedureDefinition>,
+): void {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return;
+    }
+
+    if (isKlaspProcedureDefinition(value)) {
+        procedures.set(segments.join("."), value);
+        return;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+        visitKlaspApiTree(child, [...segments, key], procedures);
+    }
+}
+
+function isKlaspProcedureDefinition(
+    value: object,
+): value is KlaspProcedureDefinition {
+    if (!(KLASP_PROCEDURE_DESCRIPTOR in value)) {
+        return false;
+    }
+
+    const procedure = value as {
+        readonly [KLASP_PROCEDURE_DESCRIPTOR]: unknown;
+        readonly type?: unknown;
+    };
+
+    return (
+        procedure[KLASP_PROCEDURE_DESCRIPTOR] === true &&
+        (procedure.type === "query" || procedure.type === "mutation")
+    );
 }
 
 export interface CreateKlaspEventsStreamOptions {
