@@ -6,8 +6,11 @@ import {
     type KlaspRpcResponse,
 } from "@klasp/core";
 
-export interface CreateKlaspClientOptions {
+export interface CreateKlaspClientOptions<
+    TApi extends Record<string, unknown> = Record<string, unknown>,
+> {
     endpoint: string;
+    api?: TApi;
     fetch?: typeof fetch;
     clientId?: string;
 }
@@ -36,21 +39,118 @@ export type KlaspProcedureOutput<TProcedure> = TProcedure extends {
     ? TOutput
     : never;
 
-export interface KlaspQueryResource {
-    id: string;
-    topics: string[];
-    refresh: () => Promise<unknown> | unknown;
+export type KlaspQueryStatus = "idle" | "loading" | "success" | "error";
+export type KlaspConnectionStatus =
+    | "idle"
+    | "connecting"
+    | "connected"
+    | "error"
+    | "closed";
+
+export interface KlaspQueryResourceState<TData> {
+    data: TData | undefined;
+    error: Error | null;
+    status: KlaspQueryStatus;
+    isLoading: boolean;
+    isError: boolean;
+    isSuccess: boolean;
+}
+
+export type KlaspQueryResourceListener<TData> = (
+    state: KlaspQueryResourceState<TData>,
+) => void;
+
+export interface KlaspQueryResource<TInput = unknown, TData = unknown> {
+    readonly id: string;
+    getSnapshot(): KlaspQueryResourceState<TData>;
+    subscribe(listener: KlaspQueryResourceListener<TData>): () => void;
+    refetch(): Promise<TData>;
+    setInput(input: TInput): void;
+    dispose(): void;
+}
+
+export interface CreateKlaspQueryResourceOptions {
+    enabled?: boolean;
 }
 
 export interface KlaspInvalidationMessage {
     topic: string;
 }
 
-export function createKlaspClient(options: CreateKlaspClientOptions) {
+export interface KlaspClient<
+    _TApi extends Record<string, unknown> = Record<string, unknown>,
+> {
+    readonly clientId: string;
+    query<TProcedure extends KlaspQueryProcedure>(
+        procedure: TProcedure,
+        input: KlaspProcedureInput<TProcedure>,
+    ): Promise<KlaspProcedureOutput<TProcedure>>;
+    query<TInput, TOutput>(path: string, input: TInput): Promise<TOutput>;
+    mutation<TProcedure extends KlaspMutationProcedure>(
+        procedure: TProcedure,
+        input: KlaspProcedureInput<TProcedure>,
+    ): Promise<KlaspProcedureOutput<TProcedure>>;
+    mutation<TInput, TOutput>(path: string, input: TInput): Promise<TOutput>;
+    createQueryResource<TProcedure extends KlaspQueryProcedure>(
+        procedure: TProcedure,
+        input: KlaspProcedureInput<TProcedure>,
+        options?: CreateKlaspQueryResourceOptions,
+    ): KlaspQueryResource<
+        KlaspProcedureInput<TProcedure>,
+        KlaspProcedureOutput<TProcedure>
+    >;
+    createQueryResource<TInput, TOutput>(
+        path: string,
+        input: TInput,
+        options?: CreateKlaspQueryResourceOptions,
+    ): KlaspQueryResource<TInput, TOutput>;
+    connectEvents(onEvent: (event: MessageEvent) => void): () => void;
+    connectInvalidations(
+        onInvalidation: (event: KlaspInvalidationMessage) => void,
+    ): () => void;
+    subscribeConnection(
+        listener: (status: KlaspConnectionStatus) => void,
+    ): () => void;
+    getConnectionStatus(): KlaspConnectionStatus;
+    getResourceKey(
+        procedure: string | KlaspQueryProcedure | KlaspMutationProcedure,
+        input: unknown,
+    ): string;
+}
+
+export function createKlaspClient<
+    TApi extends Record<string, unknown> = Record<string, unknown>,
+>(options: CreateKlaspClientOptions<TApi>): KlaspClient<TApi> {
     const fetchImpl = options.fetch ?? fetch;
     const clientId = options.clientId ?? createKlaspClientId();
+    const procedurePaths = options.api
+        ? createKlaspProcedurePathMap(options.api)
+        : new WeakMap<object, string>();
+    const resourcesById = new Map<
+        string,
+        {
+            topics: string[];
+            refresh: () => Promise<unknown>;
+        }
+    >();
+    const resourcesByTopic = new Map<string, Set<string>>();
+    const connectionListeners = new Set<
+        (status: KlaspConnectionStatus) => void
+    >();
+    let connectionStatus: KlaspConnectionStatus = "idle";
 
-    const call = async <TInput, TOutput>(
+    const setConnectionStatus = (status: KlaspConnectionStatus) => {
+        if (connectionStatus === status) {
+            return;
+        }
+
+        connectionStatus = status;
+        for (const listener of connectionListeners) {
+            listener(connectionStatus);
+        }
+    };
+
+    const rawCall = async <TInput, TOutput>(
         type: "query" | "mutation",
         path: string,
         input: TInput,
@@ -70,34 +170,141 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
             body: JSON.stringify(request),
         });
 
-        // Klasp server will always return a 200 status code, even if the request is invalid.
-        // So this is a HTTP failure.
+        // Klasp protocol errors are serialized as RPC responses. Non-OK HTTP
+        // responses mean the transport itself failed.
         if (!response.ok) {
             throw new Error(`Klasp call failed: ${response.status}`);
         }
 
-        const data = (await response.json()) as KlaspRpcResponse<TOutput>;
+        return (await response.json()) as KlaspRpcResponse<TOutput>;
+    };
 
-        return data;
+    const resolvePath = (
+        procedure: string | KlaspQueryProcedure | KlaspMutationProcedure,
+        type: "query" | "mutation",
+    ): string => getKlaspProcedurePath(procedure, type, procedurePaths);
+
+    const unregisterResource = (id: string) => {
+        const previous = resourcesById.get(id);
+        if (!previous) {
+            return;
+        }
+
+        for (const topic of previous.topics) {
+            const ids = resourcesByTopic.get(topic);
+            ids?.delete(id);
+
+            if (ids?.size === 0) {
+                resourcesByTopic.delete(topic);
+            }
+        }
+
+        resourcesById.delete(id);
+    };
+
+    const registerResource = (
+        id: string,
+        topics: string[],
+        refresh: () => Promise<unknown>,
+    ) => {
+        unregisterResource(id);
+
+        if (topics.length === 0) {
+            return;
+        }
+
+        resourcesById.set(id, {
+            topics,
+            refresh,
+        });
+
+        for (const topic of topics) {
+            const ids = resourcesByTopic.get(topic) ?? new Set<string>();
+            ids.add(id);
+            resourcesByTopic.set(topic, ids);
+        }
+    };
+
+    const invalidate = (topic: string) => {
+        const resourceIds = resourcesByTopic.get(topic);
+        if (!resourceIds) {
+            return;
+        }
+
+        for (const resourceId of Array.from(resourceIds)) {
+            const resource = resourcesById.get(resourceId);
+            void resource?.refresh();
+        }
     };
 
     const connectEvents = (onEvent: (event: MessageEvent) => void) => {
+        setConnectionStatus("connecting");
+
         const source = new EventSource(
             `${options.endpoint}/events?clientId=${encodeURIComponent(clientId)}`,
         );
 
+        const handleOpen = () => {
+            setConnectionStatus("connected");
+        };
+        const handleError = () => {
+            setConnectionStatus("error");
+        };
+
+        source.addEventListener("open", handleOpen);
+        source.addEventListener("error", handleError);
+        source.addEventListener("klasp.connected", handleOpen);
         source.addEventListener("klasp.invalidate", onEvent);
 
         return () => {
+            source.removeEventListener("open", handleOpen);
+            source.removeEventListener("error", handleError);
+            source.removeEventListener("klasp.connected", handleOpen);
+            source.removeEventListener("klasp.invalidate", onEvent);
             source.close();
+            setConnectionStatus("closed");
         };
     };
 
-    return {
+    const client: KlaspClient<TApi> = {
         clientId,
-        query: call.bind(null, "query"),
-        mutation: call.bind(null, "mutation"),
+
+        async query<TInput, TOutput>(
+            procedureOrPath: string | KlaspQueryProcedure<TInput, TOutput>,
+            input: TInput,
+        ): Promise<TOutput> {
+            const path = resolvePath(procedureOrPath, "query");
+            return unwrapKlaspResponse(await rawCall("query", path, input));
+        },
+
+        async mutation<TInput, TOutput>(
+            procedureOrPath: string | KlaspMutationProcedure<TInput, TOutput>,
+            input: TInput,
+        ): Promise<TOutput> {
+            const path = resolvePath(procedureOrPath, "mutation");
+            return unwrapKlaspResponse(await rawCall("mutation", path, input));
+        },
+
+        createQueryResource<TInput, TOutput>(
+            procedureOrPath: string | KlaspQueryProcedure<TInput, TOutput>,
+            input: TInput,
+            resourceOptions: CreateKlaspQueryResourceOptions = {},
+        ): KlaspQueryResource<TInput, TOutput> {
+            const path = resolvePath(procedureOrPath, "query");
+
+            return createKlaspQueryResource({
+                enabled: resourceOptions.enabled ?? true,
+                input,
+                path,
+                rawQuery: (nextInput) =>
+                    rawCall<TInput, TOutput>("query", path, nextInput),
+                register: registerResource,
+                unregister: unregisterResource,
+            });
+        },
+
         connectEvents,
+
         connectInvalidations(
             onInvalidation: (event: KlaspInvalidationMessage) => void,
         ) {
@@ -108,7 +315,39 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
                 }
             });
         },
+
+        subscribeConnection(listener) {
+            connectionListeners.add(listener);
+            listener(connectionStatus);
+
+            return () => {
+                connectionListeners.delete(listener);
+            };
+        },
+
+        getConnectionStatus() {
+            return connectionStatus;
+        },
+
+        getResourceKey(procedure, input) {
+            const type =
+                typeof procedure === "string" || procedure.type === "query"
+                    ? "query"
+                    : "mutation";
+            return createKlaspResourceKey(
+                getKlaspProcedurePath(procedure, type, procedurePaths),
+                input,
+            );
+        },
     };
+
+    if (typeof EventSource !== "undefined") {
+        client.connectInvalidations((event) => {
+            invalidate(event.topic);
+        });
+    }
+
+    return client;
 }
 
 function createKlaspClientId(): string {
@@ -171,55 +410,156 @@ export function getKlaspProcedurePath(
     return path;
 }
 
-export function createKlaspInvalidationRegistry() {
-    const resourcesById = new Map<string, KlaspQueryResource>();
-    const resourcesByTopic = new Map<string, Set<string>>();
+interface CreateInternalQueryResourceOptions<TInput, TData> {
+    enabled?: boolean;
+    input: TInput;
+    path: string;
+    rawQuery(input: TInput): Promise<KlaspRpcResponse<TData>>;
+    register(
+        id: string,
+        topics: string[],
+        refresh: () => Promise<unknown>,
+    ): void;
+    unregister(id: string): void;
+}
 
-    const unregister = (id: string) => {
-        const previous = resourcesById.get(id);
-        if (!previous) {
-            return;
+function createKlaspQueryResource<TInput, TData>({
+    enabled = true,
+    input,
+    path,
+    rawQuery,
+    register,
+    unregister,
+}: CreateInternalQueryResourceOptions<TInput, TData>): KlaspQueryResource<
+    TInput,
+    TData
+> {
+    let currentInput = input;
+    let id = createKlaspResourceKey(path, currentInput);
+    let disposed = false;
+    let requestId = 0;
+    let state = createKlaspQueryResourceState<TData>(
+        undefined,
+        null,
+        enabled ? "loading" : "idle",
+    );
+    const listeners = new Set<KlaspQueryResourceListener<TData>>();
+
+    const notify = () => {
+        for (const listener of listeners) {
+            listener(state);
         }
+    };
 
-        for (const topic of previous.topics) {
-            const ids = resourcesByTopic.get(topic);
-            ids?.delete(id);
+    const setState = (
+        data: TData | undefined,
+        error: Error | null,
+        status: KlaspQueryStatus,
+    ) => {
+        state = createKlaspQueryResourceState(data, error, status);
+        notify();
+    };
 
-            if (ids?.size === 0) {
-                resourcesByTopic.delete(topic);
+    const resource: KlaspQueryResource<TInput, TData> = {
+        get id() {
+            return id;
+        },
+
+        getSnapshot() {
+            return state;
+        },
+
+        subscribe(listener) {
+            if (disposed) {
+                listener(state);
+                return () => {};
             }
-        }
 
-        resourcesById.delete(id);
+            listeners.add(listener);
+            listener(state);
+
+            return () => {
+                listeners.delete(listener);
+            };
+        },
+
+        async refetch(): Promise<TData> {
+            if (disposed) {
+                throw new Error(
+                    "Cannot refetch a disposed Klasp query resource.",
+                );
+            }
+
+            const nextRequestId = requestId + 1;
+            requestId = nextRequestId;
+            setState(state.data, null, "loading");
+
+            try {
+                const response = await rawQuery(currentInput);
+                const data = unwrapKlaspResponse(response);
+
+                if (disposed || nextRequestId !== requestId) {
+                    return data;
+                }
+
+                setState(data, null, "success");
+                register(id, response.live?.topics ?? [], () =>
+                    resource.refetch(),
+                );
+
+                return data;
+            } catch (error) {
+                const nextError = toError(error);
+
+                if (!disposed && nextRequestId === requestId) {
+                    setState(state.data, nextError, "error");
+                    unregister(id);
+                }
+
+                throw nextError;
+            }
+        },
+
+        setInput(nextInput: TInput) {
+            if (disposed) {
+                return;
+            }
+
+            const previousId = id;
+            currentInput = nextInput;
+            id = createKlaspResourceKey(path, currentInput);
+
+            if (previousId !== id) {
+                unregister(previousId);
+            }
+        },
+
+        dispose() {
+            if (disposed) {
+                return;
+            }
+
+            disposed = true;
+            unregister(id);
+            listeners.clear();
+        },
     };
 
-    const register = (resource: KlaspQueryResource) => {
-        unregister(resource.id);
-        resourcesById.set(resource.id, resource);
+    return resource;
+}
 
-        for (const topic of resource.topics) {
-            const ids = resourcesByTopic.get(topic) ?? new Set<string>();
-            ids.add(resource.id);
-            resourcesByTopic.set(topic, ids);
-        }
-    };
-
-    const invalidate = (topic: string) => {
-        const resourceIds = resourcesByTopic.get(topic);
-        if (!resourceIds) {
-            return;
-        }
-
-        for (const resourceId of resourceIds) {
-            const resource = resourcesById.get(resourceId);
-            void resource?.refresh();
-        }
-    };
-
+function createKlaspQueryResourceState<TData>(
+    data: TData | undefined,
+    error: Error | null,
+    status: KlaspQueryStatus,
+): KlaspQueryResourceState<TData> {
     return {
-        register,
-        unregister,
-        invalidate,
+        data,
+        error,
+        status,
+        isLoading: status === "loading",
+        isError: status === "error",
+        isSuccess: status === "success",
     };
 }
 
@@ -274,6 +614,10 @@ export function unwrapKlaspResponse<TData>(
 
 export function toError(error: unknown): Error {
     return error instanceof Error ? error : new Error(String(error));
+}
+
+export function createKlaspResourceKey(path: string, input: unknown): string {
+    return `${path}:${stableSerialize(input)}`;
 }
 
 export function stableSerialize(value: unknown): string {

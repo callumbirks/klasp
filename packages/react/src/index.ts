@@ -1,19 +1,15 @@
 import {
     type CreateKlaspClientOptions,
     createKlaspClient,
-    createKlaspInvalidationRegistry,
-    createKlaspProcedurePathMap,
-    getKlaspProcedurePath,
+    type KlaspClient,
     type KlaspMutationProcedure,
     type KlaspProcedureInput,
     type KlaspProcedureOutput,
     type KlaspQueryProcedure,
     type KlaspQueryResource,
-    stableSerialize,
+    type KlaspQueryResourceState,
     toError,
-    unwrapKlaspResponse,
 } from "@klasp/client";
-import type { KlaspRpcResponse } from "@klasp/core";
 import {
     createContext,
     createElement,
@@ -22,26 +18,29 @@ import {
     useCallback,
     useContext,
     useEffect,
-    useId,
     useMemo,
     useRef,
     useState,
 } from "react";
 
 export type {
+    KlaspClient,
+    KlaspConnectionStatus,
     KlaspMutationProcedure,
     KlaspProcedureInput,
     KlaspProcedureOutput,
     KlaspQueryProcedure,
+    KlaspQueryResource,
+    KlaspQueryResourceState,
+    KlaspQueryStatus,
 } from "@klasp/client";
 
-export type KlaspQueryStatus = "idle" | "loading" | "success" | "error";
 export type KlaspMutationStatus = "idle" | "loading" | "success" | "error";
 
 export interface KlaspProviderProps<TApi extends Record<string, unknown>> {
     api: TApi;
     endpoint: string;
-    fetch?: CreateKlaspClientOptions["fetch"];
+    fetch?: CreateKlaspClientOptions<TApi>["fetch"];
     children: ReactNode;
 }
 
@@ -49,13 +48,8 @@ export interface UseKlaspQueryOptions {
     enabled?: boolean;
 }
 
-export interface UseKlaspQueryResult<TData> {
-    data: TData | undefined;
-    error: Error | null;
-    status: KlaspQueryStatus;
-    isLoading: boolean;
-    isError: boolean;
-    isSuccess: boolean;
+export interface UseKlaspQueryResult<TData>
+    extends KlaspQueryResourceState<TData> {
     refetch: () => Promise<TData>;
 }
 
@@ -71,13 +65,7 @@ export interface UseKlaspMutationResult<TInput, TData> {
 }
 
 interface KlaspReactContextValue {
-    client: ReturnType<typeof createKlaspClient>;
-    getProcedurePath: (
-        procedure: string | KlaspQueryProcedure | KlaspMutationProcedure,
-        type: "query" | "mutation",
-    ) => string;
-    registerQueryResource: (resource: KlaspQueryResource) => void;
-    unregisterQueryResource: (id: string) => void;
+    client: KlaspClient;
 }
 
 const KlaspReactContext = createContext<KlaspReactContextValue | null>(null);
@@ -88,55 +76,19 @@ export function KlaspProvider<TApi extends Record<string, unknown>>({
     fetch,
     children,
 }: KlaspProviderProps<TApi>): ReactElement {
-    const procedurePaths = useMemo(
-        () => createKlaspProcedurePathMap(api),
-        [api],
-    );
-    const invalidationRegistry = useMemo(
-        () => createKlaspInvalidationRegistry(),
-        [],
-    );
-
     const client = useMemo(() => {
         if (fetch) {
-            return createKlaspClient({ endpoint, fetch });
+            return createKlaspClient({ api, endpoint, fetch });
         }
 
-        return createKlaspClient({ endpoint });
-    }, [endpoint, fetch]);
-
-    const unregisterQueryResource = invalidationRegistry.unregister;
-    const registerQueryResource = invalidationRegistry.register;
-
-    const getProcedurePath = useCallback(
-        (
-            procedure: string | KlaspQueryProcedure | KlaspMutationProcedure,
-            type: "query" | "mutation",
-        ): string => {
-            return getKlaspProcedurePath(procedure, type, procedurePaths);
-        },
-        [procedurePaths],
-    );
-
-    useEffect(() => {
-        return client.connectInvalidations((event) => {
-            invalidationRegistry.invalidate(event.topic);
-        });
-    }, [client, invalidationRegistry]);
+        return createKlaspClient({ api, endpoint });
+    }, [api, endpoint, fetch]);
 
     const value = useMemo<KlaspReactContextValue>(
         () => ({
             client,
-            getProcedurePath,
-            registerQueryResource,
-            unregisterQueryResource,
         }),
-        [
-            client,
-            getProcedurePath,
-            registerQueryResource,
-            unregisterQueryResource,
-        ],
+        [client],
     );
 
     return createElement(KlaspReactContext.Provider, { value }, children);
@@ -157,115 +109,51 @@ export function useKlaspQuery<TData>(
     input: unknown,
     options: UseKlaspQueryOptions = {},
 ): UseKlaspQueryResult<TData> {
-    const context = useRequiredKlaspContext();
-    const path = context.getProcedurePath(procedureOrPath, "query");
-    const resourceId = useId();
-    const inputKey = stableSerialize(input);
+    const { client } = useRequiredKlaspContext();
     const enabled = options.enabled ?? true;
-    const queryVersion = enabled ? inputKey : null;
-    const latestInputRef = useRef(input);
-    const mountedRef = useRef(false);
-    const requestIdRef = useRef(0);
-    const [state, setState] = useState<{
-        data: TData | undefined;
-        error: Error | null;
-        status: KlaspQueryStatus;
-    }>({
-        data: undefined,
-        error: null,
-        status: enabled ? "loading" : "idle",
-    });
+    const resourceKey = client.getResourceKey(procedureOrPath, input);
+    const inputRef = useRef(input);
+    inputRef.current = input;
+    const resource = useMemo(() => {
+        // Recreate when the deterministic key changes, while reading the
+        // latest input through a ref to avoid identity-only churn.
+        void resourceKey;
 
-    latestInputRef.current = input;
-
-    useEffect(() => {
-        mountedRef.current = true;
-
-        return () => {
-            mountedRef.current = false;
-        };
-    }, []);
-
-    const refetch = useCallback(async (): Promise<TData> => {
-        const requestId = requestIdRef.current + 1;
-        requestIdRef.current = requestId;
-
-        setState((previous) => ({
-            data: previous.data,
-            error: null,
-            status: "loading",
-        }));
-
-        try {
-            const response = (await context.client.query(
-                path,
-                latestInputRef.current,
-            )) as KlaspRpcResponse<TData>;
-            const data = unwrapKlaspResponse(response);
-
-            if (mountedRef.current && requestId === requestIdRef.current) {
-                setState({
-                    data,
-                    error: null,
-                    status: "success",
-                });
-
-                if (response.live?.topics.length) {
-                    context.registerQueryResource({
-                        id: resourceId,
-                        topics: response.live.topics,
-                        refresh: refetch,
-                    });
-                } else {
-                    context.unregisterQueryResource(resourceId);
-                }
-            }
-
-            return data;
-        } catch (error) {
-            const nextError = toError(error);
-
-            if (mountedRef.current && requestId === requestIdRef.current) {
-                setState((previous) => ({
-                    data: previous.data,
-                    error: nextError,
-                    status: "error",
-                }));
-                context.unregisterQueryResource(resourceId);
-            }
-
-            throw nextError;
-        }
-    }, [context, path, resourceId]);
+        return createQueryResource<TData>(
+            client,
+            procedureOrPath,
+            inputRef.current,
+            {
+                enabled,
+            },
+        );
+    }, [client, enabled, procedureOrPath, resourceKey]);
+    const [state, setState] = useState(resource.getSnapshot);
 
     useEffect(() => {
-        if (queryVersion === null) {
-            setState((previous) => ({
-                data: previous.data,
-                error: null,
-                status: "idle",
-            }));
-            context.unregisterQueryResource(resourceId);
+        setState(resource.getSnapshot());
+        return resource.subscribe(setState);
+    }, [resource]);
+
+    useEffect(() => {
+        if (!enabled) {
             return;
         }
 
-        void refetch().catch(() => {
+        void resource.refetch().catch(() => {
             // Query errors are exposed through hook state.
         });
-    }, [context, queryVersion, refetch, resourceId]);
+    }, [enabled, resource]);
 
     useEffect(() => {
         return () => {
-            context.unregisterQueryResource(resourceId);
+            resource.dispose();
         };
-    }, [context, resourceId]);
+    }, [resource]);
 
     return {
         ...state,
-        isLoading: state.status === "loading",
-        isError: state.status === "error",
-        isSuccess: state.status === "success",
-        refetch,
+        refetch: resource.refetch,
     };
 }
 
@@ -281,8 +169,7 @@ export function useKlaspMutation<TInput, TData>(
 export function useKlaspMutation<TInput, TData>(
     procedureOrPath: string | KlaspMutationProcedure,
 ): UseKlaspMutationResult<TInput, TData> {
-    const context = useRequiredKlaspContext();
-    const path = context.getProcedurePath(procedureOrPath, "mutation");
+    const { client } = useRequiredKlaspContext();
     const mountedRef = useRef(false);
     const requestIdRef = useRef(0);
     const [state, setState] = useState<{
@@ -315,11 +202,11 @@ export function useKlaspMutation<TInput, TData>(
             }));
 
             try {
-                const response = (await context.client.mutation(
-                    path,
+                const data = await runMutation<TInput, TData>(
+                    client,
+                    procedureOrPath,
                     input,
-                )) as KlaspRpcResponse<TData>;
-                const data = unwrapKlaspResponse(response);
+                );
 
                 if (mountedRef.current && requestId === requestIdRef.current) {
                     setState({
@@ -344,7 +231,7 @@ export function useKlaspMutation<TInput, TData>(
                 throw nextError;
             }
         },
-        [context, path],
+        [client, procedureOrPath],
     );
 
     const reset = useCallback(() => {
@@ -372,4 +259,37 @@ function useRequiredKlaspContext(): KlaspReactContextValue {
     }
 
     return context;
+}
+
+function createQueryResource<TData>(
+    client: KlaspClient,
+    procedureOrPath: string | KlaspQueryProcedure,
+    input: unknown,
+    options: UseKlaspQueryOptions,
+): KlaspQueryResource<unknown, TData> {
+    if (typeof procedureOrPath === "string") {
+        return client.createQueryResource<unknown, TData>(
+            procedureOrPath,
+            input,
+            options,
+        );
+    }
+
+    return client.createQueryResource(
+        procedureOrPath,
+        input,
+        options,
+    ) as KlaspQueryResource<unknown, TData>;
+}
+
+function runMutation<TInput, TData>(
+    client: KlaspClient,
+    procedureOrPath: string | KlaspMutationProcedure,
+    input: TInput,
+): Promise<TData> {
+    if (typeof procedureOrPath === "string") {
+        return client.mutation<TInput, TData>(procedureOrPath, input);
+    }
+
+    return client.mutation(procedureOrPath, input) as Promise<TData>;
 }
