@@ -330,6 +330,243 @@ describe("createKlaspClient", () => {
         expect(requests).toHaveLength(1);
         expect(listener).toHaveBeenCalledTimes(3);
     });
+
+    test("initial open and connected events do not refetch live resources", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const requests: unknown[] = [];
+        const fetch = createFetch(
+            [
+                {
+                    ok: true,
+                    data: ["a1"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+            ],
+            requests,
+        );
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        await resource.refetch();
+        FakeEventSource.instances[0]?.emit("open", {});
+        FakeEventSource.instances[0]?.emit("klasp.connected", {});
+        await flushMicrotasks();
+
+        expect(requests).toHaveLength(1);
+        expect(resource.getSnapshot().data).toEqual(["a1"]);
+    });
+
+    test("error followed by open refetches active live resources", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const requests: unknown[] = [];
+        const fetch = createFetch(
+            [
+                {
+                    ok: true,
+                    data: ["a1"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+                {
+                    ok: true,
+                    data: ["a2"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+            ],
+            requests,
+        );
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        FakeEventSource.instances[0]?.emit("open", {});
+        await resource.refetch();
+        FakeEventSource.instances[0]?.emit("error", {});
+        FakeEventSource.instances[0]?.emit("open", {});
+        await waitFor(() => resource.getSnapshot().data?.[0] === "a2");
+
+        expect(requests).toHaveLength(2);
+    });
+
+    test("error followed by connected event refetches active live resources", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const requests: unknown[] = [];
+        const fetch = createFetch(
+            [
+                {
+                    ok: true,
+                    data: ["a1"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+                {
+                    ok: true,
+                    data: ["a2"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+            ],
+            requests,
+        );
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        FakeEventSource.instances[0]?.emit("open", {});
+        await resource.refetch();
+        FakeEventSource.instances[0]?.emit("error", {});
+        FakeEventSource.instances[0]?.emit("klasp.connected", {});
+        await waitFor(() => resource.getSnapshot().data?.[0] === "a2");
+
+        expect(requests).toHaveLength(2);
+    });
+
+    test("duplicate reconnect open signals trigger one live refresh pass", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const requests: unknown[] = [];
+        const fetch = createFetch(
+            [
+                {
+                    ok: true,
+                    data: ["a1"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+                {
+                    ok: true,
+                    data: ["a2"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+            ],
+            requests,
+        );
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        FakeEventSource.instances[0]?.emit("open", {});
+        await resource.refetch();
+        FakeEventSource.instances[0]?.emit("error", {});
+        FakeEventSource.instances[0]?.emit("open", {});
+        FakeEventSource.instances[0]?.emit("klasp.connected", {});
+        await waitFor(() => resource.getSnapshot().data?.[0] === "a2");
+        await flushMicrotasks();
+
+        expect(requests).toHaveLength(2);
+    });
+
+    test("reconnect does not refetch resources without live topics", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const requests: unknown[] = [];
+        const fetch = createFetch(
+            [
+                {
+                    ok: true,
+                    data: ["a1"],
+                    live: undefined,
+                    error: undefined,
+                },
+            ],
+            requests,
+        );
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        FakeEventSource.instances[0]?.emit("open", {});
+        await resource.refetch();
+        FakeEventSource.instances[0]?.emit("error", {});
+        FakeEventSource.instances[0]?.emit("open", {});
+        await flushMicrotasks();
+
+        expect(requests).toHaveLength(1);
+        expect(resource.getSnapshot().data).toEqual(["a1"]);
+    });
+
+    test("reconnect does not refetch disposed live resources", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const requests: unknown[] = [];
+        const fetch = createFetch(
+            [
+                {
+                    ok: true,
+                    data: ["a1"],
+                    live: { topics: ["room:a"] },
+                    error: undefined,
+                },
+            ],
+            requests,
+        );
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        FakeEventSource.instances[0]?.emit("open", {});
+        await resource.refetch();
+        resource.dispose();
+        FakeEventSource.instances[0]?.emit("error", {});
+        FakeEventSource.instances[0]?.emit("open", {});
+        await flushMicrotasks();
+
+        expect(requests).toHaveLength(1);
+    });
+
+    test("connection subscribers receive reconnect status transitions", () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch: vi.fn() as unknown as typeof fetch,
+        });
+        const statuses: string[] = [];
+
+        client.subscribeConnection((status) => {
+            statuses.push(status);
+        });
+        FakeEventSource.instances[0]?.emit("open", {});
+        FakeEventSource.instances[0]?.emit("error", {});
+        FakeEventSource.instances[0]?.emit("klasp.connected", {});
+
+        expect(statuses).toEqual([
+            "connecting",
+            "connected",
+            "error",
+            "connected",
+        ]);
+    });
 });
 
 function createFetch(
@@ -358,4 +595,12 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
         await new Promise((resolve) => setTimeout(resolve, 1));
     }
+}
+
+async function flushMicrotasks(): Promise<void> {
+    await new Promise<void>((resolve) => {
+        queueMicrotask(() => {
+            resolve();
+        });
+    });
 }

@@ -138,6 +138,9 @@ export function createKlaspClient<
         (status: KlaspConnectionStatus) => void
     >();
     let connectionStatus: KlaspConnectionStatus = "idle";
+    let hasOpenedEventsStream = false;
+    let shouldRefreshLiveResourcesOnOpen = false;
+    let reconnectRefreshQueued = false;
 
     const setConnectionStatus = (status: KlaspConnectionStatus) => {
         if (connectionStatus === status) {
@@ -237,6 +240,45 @@ export function createKlaspClient<
         }
     };
 
+    const refreshLiveResources = () => {
+        for (const resource of Array.from(resourcesById.values())) {
+            void resource.refresh();
+        }
+    };
+
+    const queueReconnectRefresh = () => {
+        if (reconnectRefreshQueued) {
+            return;
+        }
+
+        reconnectRefreshQueued = true;
+        queueMicrotask(() => {
+            reconnectRefreshQueued = false;
+            refreshLiveResources();
+        });
+    };
+
+    const handleEventsStreamOpen = () => {
+        const shouldRefresh =
+            hasOpenedEventsStream && shouldRefreshLiveResourcesOnOpen;
+
+        hasOpenedEventsStream = true;
+        shouldRefreshLiveResourcesOnOpen = false;
+        setConnectionStatus("connected");
+
+        if (shouldRefresh) {
+            queueReconnectRefresh();
+        }
+    };
+
+    const handleEventsStreamError = () => {
+        if (hasOpenedEventsStream) {
+            shouldRefreshLiveResourcesOnOpen = true;
+        }
+
+        setConnectionStatus("error");
+    };
+
     const connectEvents = (onEvent: (event: MessageEvent) => void) => {
         setConnectionStatus("connecting");
 
@@ -244,24 +286,23 @@ export function createKlaspClient<
             `${options.endpoint}/events?clientId=${encodeURIComponent(clientId)}`,
         );
 
-        const handleOpen = () => {
-            setConnectionStatus("connected");
-        };
-        const handleError = () => {
-            setConnectionStatus("error");
-        };
-
-        source.addEventListener("open", handleOpen);
-        source.addEventListener("error", handleError);
-        source.addEventListener("klasp.connected", handleOpen);
+        source.addEventListener("open", handleEventsStreamOpen);
+        source.addEventListener("error", handleEventsStreamError);
+        source.addEventListener("klasp.connected", handleEventsStreamOpen);
         source.addEventListener("klasp.invalidate", onEvent);
 
         return () => {
-            source.removeEventListener("open", handleOpen);
-            source.removeEventListener("error", handleError);
-            source.removeEventListener("klasp.connected", handleOpen);
+            source.removeEventListener("open", handleEventsStreamOpen);
+            source.removeEventListener("error", handleEventsStreamError);
+            source.removeEventListener(
+                "klasp.connected",
+                handleEventsStreamOpen,
+            );
             source.removeEventListener("klasp.invalidate", onEvent);
             source.close();
+            if (hasOpenedEventsStream) {
+                shouldRefreshLiveResourcesOnOpen = true;
+            }
             setConnectionStatus("closed");
         };
     };
