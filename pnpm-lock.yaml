@@ -126,6 +126,7 @@ importers:
       '@klasp/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
       zod:
         specifier: ^4.0.0
         version: 4.4.1

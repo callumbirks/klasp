@@ -1,5 +1,6 @@
 import { KlaspError, type KlaspInvalidationEvent } from "@klasp/core";
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
     createKlasp,
     createKlaspEventsResponse,
@@ -41,8 +42,9 @@ function createTestApi() {
     const api = klasp.router({
         rooms: {
             messages: klasp.query({
+                input: parseRoomInput,
                 handler({ input }) {
-                    const roomId = String((input as { roomId: string }).roomId);
+                    const roomId = input.roomId;
 
                     if (roomId === "forbidden") {
                         throw new KlaspError("FORBIDDEN", "No access.");
@@ -52,15 +54,14 @@ function createTestApi() {
                 },
                 live({ input }) {
                     return {
-                        topics: [
-                            `room:${(input as { roomId: string }).roomId}`,
-                        ],
+                        topics: [`room:${input.roomId}`],
                     };
                 },
             }),
             send: klasp.mutation({
+                input: parseRoomInput,
                 async handler({ input, klasp: runtime }) {
-                    const roomId = String((input as { roomId: string }).roomId);
+                    const roomId = input.roomId;
                     await runtime.invalidate(`room:${roomId}`);
                     return { roomId };
                 },
@@ -69,6 +70,23 @@ function createTestApi() {
     });
 
     return { klasp, api };
+}
+
+function parseRoomInput(input: unknown): { roomId: string } {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+        throw new KlaspError("VALIDATION_ERROR", "Expected an object input.");
+    }
+
+    const roomId = (input as { roomId?: unknown }).roomId;
+
+    if (typeof roomId !== "string" || !roomId) {
+        throw new KlaspError(
+            "VALIDATION_ERROR",
+            "Expected a non-empty roomId.",
+        );
+    }
+
+    return { roomId };
 }
 
 async function openEvents(klasp: Klasp, clientId: string) {
@@ -101,7 +119,7 @@ async function query(
     klasp: Klasp,
     api: KlaspApi,
     clientId: string | undefined,
-    roomId: string,
+    roomId: unknown,
 ) {
     const body: Record<string, unknown> = {
         version: 1,
@@ -241,5 +259,115 @@ describe("server-side topic authorization", () => {
         expect(await readText(client.reader, 20)).toBeNull();
 
         client.abort();
+    });
+});
+
+describe("procedure input validation", () => {
+    test("infers handler input from a custom input parser", async () => {
+        const klasp = createKlasp({});
+        const api = klasp.router({
+            rooms: {
+                messages: klasp.query({
+                    input: parseRoomInput,
+                    handler({ input }) {
+                        return input.roomId.toUpperCase();
+                    },
+                }),
+            },
+        });
+
+        const response = await createKlaspRpcResponse({
+            klasp,
+            api,
+            request: new Request("http://localhost/klasp/rpc", {
+                method: "POST",
+                body: JSON.stringify({
+                    version: 1,
+                    type: "query",
+                    path: "rooms.messages",
+                    input: { roomId: "general" },
+                }),
+            }),
+        });
+
+        await expect(response.json()).resolves.toMatchObject({
+            ok: true,
+            data: "GENERAL",
+        });
+    });
+
+    test("supports Zod schemas without importing Zod in the runtime", async () => {
+        const klasp = createKlasp({});
+        const api = klasp.router({
+            rooms: {
+                messages: klasp.query({
+                    input: z.object({
+                        roomId: z.string().min(1),
+                    }),
+                    handler({ input }) {
+                        return input.roomId;
+                    },
+                }),
+            },
+        });
+
+        const response = await createKlaspRpcResponse({
+            klasp,
+            api,
+            request: new Request("http://localhost/klasp/rpc", {
+                method: "POST",
+                body: JSON.stringify({
+                    version: 1,
+                    type: "query",
+                    path: "rooms.messages",
+                    input: { roomId: "" },
+                }),
+            }),
+        });
+
+        const body = await response.json();
+
+        expect(body).toMatchObject({
+            ok: false,
+            error: {
+                code: "VALIDATION_ERROR",
+                message: "Invalid procedure input.",
+            },
+        });
+        expect(body.error.details.issues).toEqual([
+            expect.objectContaining({
+                path: ["roomId"],
+            }),
+        ]);
+    });
+
+    test("allows procedures without input validation", async () => {
+        const klasp = createKlasp({});
+        const api = klasp.router({
+            echo: klasp.query({
+                handler({ input }) {
+                    return input;
+                },
+            }),
+        });
+
+        const response = await createKlaspRpcResponse({
+            klasp,
+            api,
+            request: new Request("http://localhost/klasp/rpc", {
+                method: "POST",
+                body: JSON.stringify({
+                    version: 1,
+                    type: "query",
+                    path: "echo",
+                    input: { raw: true },
+                }),
+            }),
+        });
+
+        await expect(response.json()).resolves.toMatchObject({
+            ok: true,
+            data: { raw: true },
+        });
     });
 });

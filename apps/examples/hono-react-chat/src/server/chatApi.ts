@@ -29,7 +29,7 @@ export function createChatApi(realtime?: KlaspRealtimeAdapter) {
     const api = klasp.router<typeof chatContract>({
         chat: {
             listMessages: klasp.query({
-                parseInput: parseListMessagesInput,
+                input: parseListMessagesInput,
                 handler({ input }) {
                     return messages
                         .filter((message) => message.roomId === input.roomId)
@@ -42,7 +42,7 @@ export function createChatApi(realtime?: KlaspRealtimeAdapter) {
                 },
             }),
             sendMessage: klasp.mutation({
-                parseInput: parseSendMessageInput,
+                input: parseSendMessageInput,
                 async handler({ input, klasp: runtime }) {
                     const message: ChatMessage = {
                         id: String(nextMessageId++),

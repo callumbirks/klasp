@@ -23,6 +23,9 @@
     "dependencies": {
         "@klasp/core": "workspace:*"
     },
+    "devDependencies": {
+        "zod": "^4.0.0"
+    },
     "peerDependencies": {
         "zod": "^4.0.0"
     },

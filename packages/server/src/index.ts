@@ -19,10 +19,80 @@ export interface CreateKlaspOptions<TContext extends KlaspContext> {
     realtime?: KlaspRealtimeAdapter;
 }
 
+type MaybePromise<T> = T | Promise<T>;
+
+export type KlaspInputParser<TInput> =
+    | ((input: unknown) => MaybePromise<TInput>)
+    | {
+          parse(input: unknown): MaybePromise<TInput>;
+      }
+    | {
+          parseAsync(input: unknown): Promise<TInput>;
+      }
+    | {
+          safeParse(input: unknown): MaybePromise<KlaspSafeParseResult<TInput>>;
+      }
+    | {
+          safeParseAsync(input: unknown): Promise<KlaspSafeParseResult<TInput>>;
+      }
+    | {
+          "~standard": {
+              validate(
+                  input: unknown,
+              ): MaybePromise<KlaspStandardSchemaResult<TInput>>;
+          };
+      };
+
+export type KlaspSafeParseResult<TInput> =
+    | {
+          success: true;
+          data: TInput;
+      }
+    | {
+          success: false;
+          error: unknown;
+      };
+
+export type KlaspStandardSchemaResult<TInput> =
+    | {
+          value: TInput;
+      }
+    | {
+          issues: readonly unknown[];
+      };
+
+export type InferKlaspInput<TInputParser> = TInputParser extends (
+    input: unknown,
+) => infer TInput
+    ? Awaited<TInput>
+    : TInputParser extends { parse(input: unknown): infer TInput }
+      ? Awaited<TInput>
+      : TInputParser extends { parseAsync(input: unknown): infer TInput }
+        ? Awaited<TInput>
+        : TInputParser extends {
+                safeParseAsync(input: unknown): infer TResult;
+            }
+          ? Awaited<TResult> extends KlaspSafeParseResult<infer TInput>
+              ? TInput
+              : never
+          : TInputParser extends { safeParse(input: unknown): infer TResult }
+            ? Awaited<TResult> extends KlaspSafeParseResult<infer TInput>
+                ? TInput
+                : never
+            : TInputParser extends {
+                    "~standard": {
+                        validate(input: unknown): infer TResult;
+                    };
+                }
+              ? Awaited<TResult> extends KlaspStandardSchemaResult<infer TInput>
+                  ? TInput
+                  : never
+              : never;
+
 export interface KlaspQueryDefinition<TInput, TOutput, TContext>
     extends KlaspProcedureDescriptor<"query", TInput, TOutput> {
     type: "query";
-    parseInput?: (input: unknown) => TInput;
+    input?: KlaspInputParser<TInput>;
     handler(input: {
         input: TInput;
         ctx: TContext;
@@ -34,7 +104,7 @@ export interface KlaspQueryDefinition<TInput, TOutput, TContext>
 export interface KlaspMutationDefinition<TInput, TOutput, TContext>
     extends KlaspProcedureDescriptor<"mutation", TInput, TOutput> {
     type: "mutation";
-    parseInput?: (input: unknown) => TInput;
+    input?: KlaspInputParser<TInput>;
     handler(input: {
         input: TInput;
         ctx: TContext;
@@ -79,9 +149,31 @@ export type KlaspRouterImplementation<TContract, TContext> =
           : never;
 
 export interface Klasp<TContext extends KlaspContext = KlaspContext> {
+    query<TInputParser extends KlaspInputParser<unknown>, TOutput>(
+        definition: KlaspQueryOptions<
+            InferKlaspInput<TInputParser>,
+            TOutput,
+            TContext
+        > & {
+            input: TInputParser;
+        },
+    ): KlaspQueryDefinition<InferKlaspInput<TInputParser>, TOutput, TContext>;
     query<TInput, TOutput>(
         definition: KlaspQueryOptions<TInput, TOutput, TContext>,
     ): KlaspQueryDefinition<TInput, TOutput, TContext>;
+    mutation<TInputParser extends KlaspInputParser<unknown>, TOutput>(
+        definition: KlaspMutationOptions<
+            InferKlaspInput<TInputParser>,
+            TOutput,
+            TContext
+        > & {
+            input: TInputParser;
+        },
+    ): KlaspMutationDefinition<
+        InferKlaspInput<TInputParser>,
+        TOutput,
+        TContext
+    >;
     mutation<TInput, TOutput>(
         definition: KlaspMutationOptions<TInput, TOutput, TContext>,
     ): KlaspMutationDefinition<TInput, TOutput, TContext>;
@@ -181,9 +273,10 @@ export async function createKlaspRpcResponse(
     }
 
     try {
-        const input = procedure.parseInput
-            ? procedure.parseInput(request.input)
-            : request.input;
+        const input = await parseKlaspProcedureInput(
+            procedure.input,
+            request.input,
+        );
 
         const ctx = await options.klasp.createContext(options.request);
 
@@ -234,6 +327,82 @@ export async function createKlaspRpcResponse(
             },
         });
     }
+}
+
+async function parseKlaspProcedureInput<TInput>(
+    parser: KlaspInputParser<TInput> | undefined,
+    input: unknown,
+): Promise<TInput> {
+    if (!parser) {
+        return input as TInput;
+    }
+
+    try {
+        if (typeof parser === "function") {
+            return await parser(input);
+        }
+
+        if ("~standard" in parser) {
+            const result = await parser["~standard"].validate(input);
+
+            if ("value" in result) {
+                return result.value;
+            }
+
+            throw createInputValidationError(result.issues);
+        }
+
+        if ("safeParseAsync" in parser) {
+            const result = await parser.safeParseAsync(input);
+
+            if (result.success) {
+                return result.data;
+            }
+
+            throw createInputValidationError(getValidationIssues(result.error));
+        }
+
+        if ("safeParse" in parser) {
+            const result = await parser.safeParse(input);
+
+            if (result.success) {
+                return result.data;
+            }
+
+            throw createInputValidationError(getValidationIssues(result.error));
+        }
+
+        if ("parseAsync" in parser) {
+            return await parser.parseAsync(input);
+        }
+
+        return await parser.parse(input);
+    } catch (error) {
+        if (error instanceof KlaspError) {
+            throw error;
+        }
+
+        throw createInputValidationError(getValidationIssues(error));
+    }
+}
+
+function createInputValidationError(issues: unknown): KlaspError {
+    return new KlaspError("VALIDATION_ERROR", "Invalid procedure input.", {
+        issues,
+    });
+}
+
+function getValidationIssues(error: unknown): unknown {
+    if (
+        error &&
+        typeof error === "object" &&
+        "issues" in error &&
+        Array.isArray(error.issues)
+    ) {
+        return error.issues;
+    }
+
+    return error;
 }
 
 function getKlaspApiProcedureMap(
