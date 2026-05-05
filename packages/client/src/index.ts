@@ -9,6 +9,7 @@ import {
 export interface CreateKlaspClientOptions {
     endpoint: string;
     fetch?: typeof fetch;
+    clientId?: string;
 }
 
 export type KlaspQueryProcedure<
@@ -47,6 +48,7 @@ export interface KlaspInvalidationMessage {
 
 export function createKlaspClient(options: CreateKlaspClientOptions) {
     const fetchImpl = options.fetch ?? fetch;
+    const clientId = options.clientId ?? createKlaspClientId();
 
     const call = async <TInput, TOutput>(
         type: "query" | "mutation",
@@ -58,6 +60,7 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
             type,
             path,
             input,
+            clientId,
         };
         const response = await fetchImpl(`${options.endpoint}/rpc`, {
             method: "POST",
@@ -79,7 +82,9 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
     };
 
     const connectEvents = (onEvent: (event: MessageEvent) => void) => {
-        const source = new EventSource(`${options.endpoint}/events`);
+        const source = new EventSource(
+            `${options.endpoint}/events?clientId=${encodeURIComponent(clientId)}`,
+        );
 
         source.addEventListener("klasp.invalidate", onEvent);
 
@@ -89,6 +94,7 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
     };
 
     return {
+        clientId,
         query: call.bind(null, "query"),
         mutation: call.bind(null, "mutation"),
         connectEvents,
@@ -103,6 +109,14 @@ export function createKlaspClient(options: CreateKlaspClientOptions) {
             });
         },
     };
+}
+
+function createKlaspClientId(): string {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+        return crypto.randomUUID();
+    }
+
+    return `klasp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
 export function createKlaspProcedurePathMap(api: Record<string, unknown>) {

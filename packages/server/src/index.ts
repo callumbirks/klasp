@@ -94,6 +94,18 @@ export interface Klasp<TContext extends KlaspContext = KlaspContext> {
     createContext(request: Request): Promise<TContext>;
     runtime: KlaspRuntime;
     realtime: KlaspRealtimeAdapter | undefined;
+    sessions: KlaspSessionStore;
+}
+
+export interface KlaspSession {
+    clientId: string;
+    close(): void;
+}
+
+export interface KlaspSessionStore {
+    connect(clientId: string): KlaspSession;
+    authorizeTopics(clientId: string | undefined, topics: string[]): void;
+    isAuthorized(clientId: string, topic: string): boolean;
 }
 
 export type KlaspProcedureDefinition =
@@ -186,6 +198,13 @@ export async function createKlaspRpcResponse(
                 ? procedure.live({ input, ctx })
                 : undefined;
 
+        if (procedure.type === "query" && live?.topics.length) {
+            options.klasp.sessions.authorizeTopics(
+                request.clientId,
+                live.topics,
+            );
+        }
+
         return createJsonResponse({
             ok: true,
             data: result,
@@ -273,6 +292,8 @@ function isKlaspProcedureDefinition(
 
 export interface CreateKlaspEventsStreamOptions {
     realtime: KlaspRealtimeAdapter | undefined;
+    isAuthorized?: (event: KlaspInvalidationEvent) => boolean;
+    onClose?: () => void;
     signal?: AbortSignal;
     heartbeatMs?: number;
     now?: () => number;
@@ -330,6 +351,7 @@ export function createKlaspEventsStream(
 
                 removeAbortListener?.();
                 await unsubscribe?.();
+                options.onClose?.();
 
                 try {
                     controller.close();
@@ -359,7 +381,9 @@ export function createKlaspEventsStream(
 
             unsubscribe = await options.realtime?.subscribeInvalidations(
                 (event: KlaspInvalidationEvent) => {
-                    write("klasp.invalidate", event);
+                    if (options.isAuthorized?.(event) ?? true) {
+                        write("klasp.invalidate", event);
+                    }
                 },
             );
 
@@ -388,10 +412,34 @@ export interface CreateKlaspEventsResponseOptions {
 export async function createKlaspEventsResponse(
     options: CreateKlaspEventsResponseOptions,
 ): Promise<Response> {
+    const clientId = getKlaspEventsClientId(options.request);
+
+    if (!clientId) {
+        return createJsonResponse(
+            {
+                ok: false,
+                data: undefined,
+                live: undefined,
+                error: {
+                    code: "BAD_REQUEST",
+                    message:
+                        "Klasp events requests require a non-empty clientId query parameter.",
+                },
+            },
+            400,
+        );
+    }
+
     await options.klasp.createContext(options.request);
 
+    const session = options.klasp.sessions.connect(clientId);
     const streamOptions: CreateKlaspEventsStreamOptions = {
         realtime: options.klasp.realtime,
+        isAuthorized: (event) =>
+            options.klasp.sessions.isAuthorized(clientId, event.topic),
+        onClose: () => {
+            session.close();
+        },
         signal: options.request.signal,
     };
 
@@ -410,9 +458,15 @@ export async function createKlaspEventsResponse(
     });
 }
 
+function getKlaspEventsClientId(request: Request): string | null {
+    const clientId = new URL(request.url).searchParams.get("clientId")?.trim();
+    return clientId || null;
+}
+
 export function createKlasp<TContext extends KlaspContext = KlaspContext>(
     options: CreateKlaspOptions<TContext>,
 ): Klasp<TContext> {
+    const sessions = createKlaspSessionStore();
     const runtime: KlaspRuntime = {
         async invalidate(topic: string) {
             await options.realtime?.publishInvalidation(topic);
@@ -456,5 +510,59 @@ export function createKlasp<TContext extends KlaspContext = KlaspContext>(
 
         runtime,
         realtime: options.realtime,
+        sessions,
+    };
+}
+
+function createKlaspSessionStore(): KlaspSessionStore {
+    const sessions = new Map<
+        string,
+        {
+            connection: symbol;
+            topics: Set<string>;
+        }
+    >();
+
+    return {
+        connect(clientId: string): KlaspSession {
+            const connection = Symbol(clientId);
+            const existing = sessions.get(clientId);
+            const topics = existing?.topics ?? new Set<string>();
+
+            sessions.set(clientId, {
+                connection,
+                topics,
+            });
+
+            return {
+                clientId,
+                close() {
+                    const active = sessions.get(clientId);
+
+                    if (active?.connection === connection) {
+                        sessions.delete(clientId);
+                    }
+                },
+            };
+        },
+
+        authorizeTopics(clientId: string | undefined, topics: string[]) {
+            if (!clientId) {
+                return;
+            }
+
+            const session = sessions.get(clientId);
+            if (!session) {
+                return;
+            }
+
+            for (const topic of topics) {
+                session.topics.add(topic);
+            }
+        },
+
+        isAuthorized(clientId: string, topic: string): boolean {
+            return sessions.get(clientId)?.topics.has(topic) ?? false;
+        },
     };
 }

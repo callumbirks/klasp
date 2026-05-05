@@ -117,6 +117,7 @@ export interface KlaspRpcRequest<TInput> {
     type: "query" | "mutation";
     path: string;
     input: TInput;
+    clientId?: string;
 }
 
 export type KlaspRpcResponse<TOutput> =
