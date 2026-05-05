@@ -113,6 +113,9 @@ export function useKlaspQuery<TData>(
     const enabled = options.enabled ?? true;
     const resourceKey = client.getResourceKey(procedureOrPath, input);
     const inputRef = useRef(input);
+    const pendingDisposalsRef = useRef<
+        Map<KlaspQueryResource<unknown, TData>, ReturnType<typeof setTimeout>>
+    >(new Map());
     inputRef.current = input;
     const resource = useMemo(() => {
         // Recreate when the deterministic key changes, while reading the
@@ -131,6 +134,13 @@ export function useKlaspQuery<TData>(
     const [state, setState] = useState(resource.getSnapshot);
 
     useEffect(() => {
+        const pendingDispose = pendingDisposalsRef.current.get(resource);
+
+        if (pendingDispose) {
+            clearTimeout(pendingDispose);
+            pendingDisposalsRef.current.delete(resource);
+        }
+
         setState(resource.getSnapshot());
         return resource.subscribe(setState);
     }, [resource]);
@@ -147,7 +157,16 @@ export function useKlaspQuery<TData>(
 
     useEffect(() => {
         return () => {
-            resource.dispose();
+            const timer = setTimeout(() => {
+                if (!pendingDisposalsRef.current.has(resource)) {
+                    return;
+                }
+
+                resource.dispose();
+                pendingDisposalsRef.current.delete(resource);
+            }, 0);
+
+            pendingDisposalsRef.current.set(resource, timer);
         };
     }, [resource]);
 
