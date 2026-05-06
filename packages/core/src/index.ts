@@ -21,6 +21,49 @@ export type KlaspErrorCode =
 
 export type KlaspObserve = (event: KlaspObservabilityEvent) => void;
 
+export interface KlaspObserveConsoleOptions {
+    console?: Pick<Console, "debug" | "error" | "info" | "warn">;
+    level?: "debug" | "info";
+}
+
+export function klaspObserveConsole(
+    options: KlaspObserveConsoleOptions = {},
+): KlaspObserve {
+    const logger = options.console ?? console;
+    const level = options.level ?? "debug";
+
+    return (event) => {
+        const log = getKlaspConsoleLogMethod(logger, event, level);
+        log(`[klasp] ${event.type}`, createKlaspConsoleEvent(event));
+    };
+}
+
+function getKlaspConsoleLogMethod(
+    logger: Pick<Console, "debug" | "error" | "info" | "warn">,
+    event: KlaspObservabilityEvent,
+    level: "debug" | "info",
+): (message?: unknown, ...optionalParams: unknown[]) => void {
+    if (event.type.endsWith(".error") || event.type.endsWith(".reject")) {
+        return logger.error.bind(logger);
+    }
+
+    if (event.type === "redis.fallback") {
+        return logger.warn.bind(logger);
+    }
+
+    return level === "info"
+        ? logger.info.bind(logger)
+        : logger.debug.bind(logger);
+}
+
+function createKlaspConsoleEvent(
+    event: KlaspObservabilityEvent,
+): Omit<KlaspObservabilityEvent, "type"> {
+    const { type: _type, ...metadata } = event;
+
+    return metadata;
+}
+
 export type KlaspObservabilityEvent =
     | KlaspServerObservabilityEvent
     | KlaspClientObservabilityEvent
