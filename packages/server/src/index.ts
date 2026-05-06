@@ -245,7 +245,13 @@ function createJsonResponse(
 export async function createKlaspRpcResponse(
     options: CreateKlaspRpcResponseOptions,
 ): Promise<Response> {
-    const request = (await options.request.json()) as KlaspRpcRequest<unknown>;
+    const parsed = await parseKlaspRpcRequest(options.request);
+
+    if (!parsed.ok) {
+        return createBadRequestResponse(parsed.message);
+    }
+
+    const { request } = parsed;
     const procedure = getKlaspApiProcedureMap(options.api).get(request.path);
 
     if (!procedure) {
@@ -323,10 +329,109 @@ export async function createKlaspRpcResponse(
             live: undefined,
             error: {
                 code: "INTERNAL_SERVER_ERROR",
-                message: `Internal server error: ${error}`,
+                message: "Internal server error.",
             },
         });
     }
+}
+
+type KlaspRpcParseResult =
+    | {
+          ok: true;
+          request: KlaspRpcRequest<unknown>;
+      }
+    | {
+          ok: false;
+          message: string;
+      };
+
+async function parseKlaspRpcRequest(
+    request: Request,
+): Promise<KlaspRpcParseResult> {
+    let body: unknown;
+
+    try {
+        body = await request.json();
+    } catch {
+        return {
+            ok: false,
+            message: "Klasp RPC requests must contain valid JSON.",
+        };
+    }
+
+    if (!isPlainRecord(body)) {
+        return {
+            ok: false,
+            message: "Klasp RPC requests must be JSON objects.",
+        };
+    }
+
+    if (body.version !== 1) {
+        return {
+            ok: false,
+            message: "Klasp RPC requests must use protocol version 1.",
+        };
+    }
+
+    if (body.type !== "query" && body.type !== "mutation") {
+        return {
+            ok: false,
+            message:
+                "Klasp RPC requests must specify a type of 'query' or 'mutation'.",
+        };
+    }
+
+    if (typeof body.path !== "string" || body.path.trim() === "") {
+        return {
+            ok: false,
+            message: "Klasp RPC requests must specify a non-empty path.",
+        };
+    }
+
+    if ("clientId" in body) {
+        if (typeof body.clientId !== "string" || body.clientId.trim() === "") {
+            return {
+                ok: false,
+                message:
+                    "Klasp RPC request clientId must be a non-empty string when provided.",
+            };
+        }
+    }
+
+    const parsedRequest: KlaspRpcRequest<unknown> = {
+        version: 1,
+        type: body.type,
+        path: body.path,
+        input: body.input,
+    };
+
+    if (typeof body.clientId === "string") {
+        parsedRequest.clientId = body.clientId.trim();
+    }
+
+    return {
+        ok: true,
+        request: parsedRequest,
+    };
+}
+
+function createBadRequestResponse(message: string): Response {
+    return createJsonResponse(
+        {
+            ok: false,
+            data: undefined,
+            live: undefined,
+            error: {
+                code: "BAD_REQUEST",
+                message,
+            },
+        },
+        400,
+    );
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function parseKlaspProcedureInput<TInput>(

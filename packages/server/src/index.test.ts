@@ -159,6 +159,17 @@ async function mutation(klasp: Klasp, api: KlaspApi, clientId: string) {
     });
 }
 
+async function rpc(klasp: Klasp, api: KlaspApi, body: unknown) {
+    return createKlaspRpcResponse({
+        klasp,
+        api,
+        request: new Request("http://localhost/klasp/rpc", {
+            method: "POST",
+            body: typeof body === "string" ? body : JSON.stringify(body),
+        }),
+    });
+}
+
 async function readText(
     reader: ReadableStreamDefaultReader<Uint8Array>,
     timeoutMs = 100,
@@ -259,6 +270,173 @@ describe("server-side topic authorization", () => {
         expect(await readText(client.reader, 20)).toBeNull();
 
         client.abort();
+    });
+});
+
+describe("RPC protocol hardening", () => {
+    test("returns BAD_REQUEST with HTTP 400 for malformed JSON", async () => {
+        const { klasp, api } = createTestApi();
+        const response = await rpc(klasp, api, "{");
+        const body = await response.json();
+
+        expect(response.status).toBe(400);
+        expect(body).toMatchObject({
+            ok: false,
+            error: {
+                code: "BAD_REQUEST",
+            },
+        });
+    });
+
+    test.each([
+        null,
+        true,
+        1,
+        "hello",
+        [],
+    ])("returns BAD_REQUEST with HTTP 400 for non-object JSON body %#", async (body) => {
+        const { klasp, api } = createTestApi();
+        const response = await rpc(klasp, api, body);
+
+        await expect(response.json()).resolves.toMatchObject({
+            ok: false,
+            error: {
+                code: "BAD_REQUEST",
+            },
+        });
+        expect(response.status).toBe(400);
+    });
+
+    test.each([
+        [{ type: "query", path: "rooms.messages" }, "missing version"],
+        [
+            { version: 2, type: "query", path: "rooms.messages" },
+            "unsupported version",
+        ],
+        [
+            { version: "1", type: "query", path: "rooms.messages" },
+            "invalid version type",
+        ],
+        [
+            { version: 1, type: "subscription", path: "rooms.messages" },
+            "invalid type",
+        ],
+        [{ version: 1, type: "query" }, "missing path"],
+        [{ version: 1, type: "query", path: "" }, "empty path"],
+        [
+            { version: 1, type: "query", path: "rooms.messages", clientId: "" },
+            "empty clientId",
+        ],
+        [
+            { version: 1, type: "query", path: "rooms.messages", clientId: 1 },
+            "invalid clientId type",
+        ],
+    ])("returns BAD_REQUEST with HTTP 400 for %s", async (body, _label) => {
+        const { klasp, api } = createTestApi();
+        const response = await rpc(klasp, api, body);
+
+        await expect(response.json()).resolves.toMatchObject({
+            ok: false,
+            error: {
+                code: "BAD_REQUEST",
+            },
+        });
+        expect(response.status).toBe(400);
+    });
+
+    test("keeps unknown procedures as serialized NOT_FOUND responses", async () => {
+        const { klasp, api } = createTestApi();
+        const response = await rpc(klasp, api, {
+            version: 1,
+            type: "query",
+            path: "rooms.missing",
+        });
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            ok: false,
+            error: {
+                code: "NOT_FOUND",
+            },
+        });
+    });
+
+    test("keeps procedure type mismatches as serialized BAD_REQUEST responses", async () => {
+        const { klasp, api } = createTestApi();
+        const response = await rpc(klasp, api, {
+            version: 1,
+            type: "mutation",
+            path: "rooms.messages",
+            input: { roomId: "general" },
+        });
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            ok: false,
+            error: {
+                code: "BAD_REQUEST",
+            },
+        });
+    });
+
+    test("preserves KlaspError code, message, and details", async () => {
+        const klasp = createKlasp({});
+        const api = klasp.router({
+            fail: klasp.query({
+                handler() {
+                    throw new KlaspError("CONFLICT", "Already exists.", {
+                        id: "message-1",
+                    });
+                },
+            }),
+        });
+        const response = await rpc(klasp, api, {
+            version: 1,
+            type: "query",
+            path: "fail",
+        });
+
+        await expect(response.json()).resolves.toMatchObject({
+            ok: false,
+            error: {
+                code: "CONFLICT",
+                message: "Already exists.",
+                details: {
+                    id: "message-1",
+                },
+            },
+        });
+    });
+
+    test.each([
+        [new Error("database password is hunter2"), "Error"],
+        ["database password is hunter2", "string"],
+        [{ secret: "database password is hunter2" }, "object"],
+    ])("hides unexpected internal %s details", async (error, _label) => {
+        const klasp = createKlasp({});
+        const api = klasp.router({
+            fail: klasp.query({
+                handler() {
+                    throw error;
+                },
+            }),
+        });
+        const response = await rpc(klasp, api, {
+            version: 1,
+            type: "query",
+            path: "fail",
+        });
+        const body = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(body).toMatchObject({
+            ok: false,
+            error: {
+                code: "INTERNAL_SERVER_ERROR",
+                message: "Internal server error.",
+            },
+        });
+        expect(JSON.stringify(body)).not.toContain("hunter2");
     });
 });
 
