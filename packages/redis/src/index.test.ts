@@ -262,6 +262,74 @@ describe("redisRealtimeAdapter", () => {
         await expect(unsubscribe()).rejects.toBe(unsubscribeError);
     });
 
+    test("allows mutations and notifies local subscribers when publishing fails in allow_mutations mode", async () => {
+        const onError = vi.fn();
+        const adapter = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            failureMode: "allow_mutations",
+            onError,
+        });
+        const publisher = getClient(0);
+        const handler = vi.fn();
+        const publishError = new Error("publish failed");
+
+        await adapter.subscribeInvalidations(handler);
+
+        publisher.publish.mockRejectedValueOnce(publishError);
+
+        await expect(adapter.publishInvalidation("room:a")).resolves.toBe(
+            undefined,
+        );
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(handler.mock.calls[0]?.[0]).toMatchObject({
+            type: "invalidate",
+            topic: "room:a",
+        });
+        expect(onError).toHaveBeenCalledWith(publishError, {
+            operation: "publish-fallback",
+            channel: "klasp:invalidations",
+        });
+    });
+
+    test("keeps local subscriptions when subscribing fails in allow_mutations mode", async () => {
+        const onError = vi.fn();
+        const adapter = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            failureMode: "allow_mutations",
+            onError,
+        });
+        const publisher = getClient(0);
+        const subscriber = getClient(1);
+        const handler = vi.fn();
+        const subscribeError = new Error("subscribe failed");
+        const publishError = new Error("publish failed");
+
+        subscriber.subscribe.mockRejectedValueOnce(subscribeError);
+        const unsubscribe = await adapter.subscribeInvalidations(handler);
+
+        publisher.publish.mockRejectedValueOnce(publishError);
+        await adapter.publishInvalidation("room:a");
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(handler.mock.calls[0]?.[0]).toMatchObject({
+            type: "invalidate",
+            topic: "room:a",
+        });
+        expect(onError).toHaveBeenCalledWith(subscribeError, {
+            operation: "subscribe-fallback",
+            channel: "klasp:invalidations",
+        });
+
+        await unsubscribe();
+
+        publisher.publish.mockRejectedValueOnce(publishError);
+        await adapter.publishInvalidation("room:b");
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(subscriber.unsubscribe).not.toHaveBeenCalled();
+    });
+
     test("reports Redis client error events through onError", () => {
         const onError = vi.fn();
         redisRealtimeAdapter({

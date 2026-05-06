@@ -4,15 +4,24 @@ import { createClient } from "redis";
 export interface RedisRealtimeAdapterOptions {
     url: string;
     namespace?: string;
+    failureMode?: RedisRealtimeAdapterFailureMode;
     onError?: (
         error: unknown,
         context: RedisRealtimeAdapterErrorContext,
     ) => void;
 }
 
+export type RedisRealtimeAdapterFailureMode =
+    | "allow_mutations"
+    | "local_fallback";
+
 export type RedisRealtimeAdapterErrorContext =
     | {
           operation: "publisher-error" | "subscriber-error";
+          channel: string;
+      }
+    | {
+          operation: "publish-fallback" | "subscribe-fallback";
           channel: string;
       }
     | {
@@ -26,18 +35,24 @@ type RedisSubscriptionListener = (
     message: string,
     channel: string,
 ) => Promise<void>;
+type InvalidationHandler = Parameters<
+    KlaspRealtimeAdapter["subscribeInvalidations"]
+>[0];
 
 const DEFAULT_NAMESPACE = "klasp";
+const DEFAULT_FAILURE_MODE: RedisRealtimeAdapterFailureMode = "local_fallback";
 
 export function redisRealtimeAdapter(
     options: RedisRealtimeAdapterOptions,
 ): KlaspRealtimeAdapter {
     const namespace = options.namespace ?? DEFAULT_NAMESPACE;
     const channel = `${namespace}:invalidations`;
+    const failureMode = options.failureMode ?? DEFAULT_FAILURE_MODE;
 
     const publisher = createClient({ url: options.url });
     const subscriber = createClient({ url: options.url });
     const subscriptions = new Set<RedisSubscriptionListener>();
+    const localHandlers = new Set<InvalidationHandler>();
 
     let closed = false;
     let publisherConnectPromise: Promise<void> | undefined;
@@ -87,20 +102,29 @@ export function redisRealtimeAdapter(
 
     return {
         async publishInvalidation(topic: string) {
-            await ensurePublisherConnected();
-
             const event: KlaspInvalidationEvent = {
                 type: "invalidate",
                 topic,
                 timestamp: Date.now(),
             };
 
-            await publisher.publish(channel, JSON.stringify(event));
+            try {
+                await ensurePublisherConnected();
+                await publisher.publish(channel, JSON.stringify(event));
+            } catch (error) {
+                if (failureMode === "local_fallback") {
+                    throw error;
+                }
+
+                options.onError?.(error, {
+                    operation: "publish-fallback",
+                    channel,
+                });
+                await publishLocalInvalidation(event, localHandlers, options);
+            }
         },
 
         async subscribeInvalidations(handler): Promise<() => Promise<void>> {
-            await ensureSubscriberConnected();
-
             const listener: RedisSubscriptionListener = async (
                 message,
                 receivedChannel,
@@ -130,11 +154,32 @@ export function redisRealtimeAdapter(
             };
 
             assertOpen();
-            await subscriber.subscribe(channel, listener);
-            subscriptions.add(listener);
+            localHandlers.add(handler);
+
+            let redisSubscribed = false;
+
+            try {
+                await ensureSubscriberConnected();
+                assertOpen();
+                await subscriber.subscribe(channel, listener);
+                subscriptions.add(listener);
+                redisSubscribed = true;
+            } catch (error) {
+                if (failureMode === "local_fallback") {
+                    localHandlers.delete(handler);
+                    throw error;
+                }
+
+                options.onError?.(error, {
+                    operation: "subscribe-fallback",
+                    channel,
+                });
+            }
 
             return async () => {
-                if (!subscriptions.delete(listener)) {
+                localHandlers.delete(handler);
+
+                if (!redisSubscribed || !subscriptions.delete(listener)) {
                     return;
                 }
 
@@ -164,6 +209,26 @@ export function redisRealtimeAdapter(
             }
         },
     };
+}
+
+async function publishLocalInvalidation(
+    event: KlaspInvalidationEvent,
+    handlers: Set<InvalidationHandler>,
+    options: RedisRealtimeAdapterOptions,
+): Promise<void> {
+    const message = JSON.stringify(event);
+
+    for (const handler of handlers) {
+        try {
+            await handler(event);
+        } catch (error) {
+            options.onError?.(error, {
+                operation: "message-handler",
+                channel: "local",
+                message,
+            });
+        }
+    }
 }
 
 async function connectClient(client: RedisClient): Promise<void> {
