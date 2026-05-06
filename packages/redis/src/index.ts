@@ -4,6 +4,16 @@ import { createClient } from "redis";
 export interface RedisRealtimeAdapterOptions {
     url: string;
     namespace?: string;
+    /**
+     * Controls what happens when Redis cannot publish or receive invalidation
+     * messages. Defaults to "drop_messages".
+     *
+     * `drop_messages` - Drop messages which would be sent through Redis, such as query invalidation. This means
+     * realtime will stop working until Redis is available again.
+     *
+     * `local_fallback` - Continue locally when Redis fails. Failed publishes notify only clients
+     * connected to this server instance.
+     */
     failureMode?: RedisRealtimeAdapterFailureMode;
     onError?: (
         error: unknown,
@@ -13,7 +23,7 @@ export interface RedisRealtimeAdapterOptions {
 
 export type RedisRealtimeAdapterFailureMode =
     | "local_fallback"
-    | "block_mutations";
+    | "drop_messages";
 
 export type RedisRealtimeAdapterErrorContext =
     | {
@@ -40,7 +50,7 @@ type InvalidationHandler = Parameters<
 >[0];
 
 const DEFAULT_NAMESPACE = "klasp";
-const DEFAULT_FAILURE_MODE: RedisRealtimeAdapterFailureMode = "block_mutations";
+const DEFAULT_FAILURE_MODE: RedisRealtimeAdapterFailureMode = "drop_messages";
 
 export function redisRealtimeAdapter(
     options: RedisRealtimeAdapterOptions,
@@ -112,7 +122,7 @@ export function redisRealtimeAdapter(
                 await ensurePublisherConnected();
                 await publisher.publish(channel, JSON.stringify(event));
             } catch (error) {
-                if (failureMode === "block_mutations") {
+                if (failureMode === "drop_messages") {
                     throw error;
                 }
 
@@ -165,7 +175,7 @@ export function redisRealtimeAdapter(
                 subscriptions.add(listener);
                 redisSubscribed = true;
             } catch (error) {
-                if (failureMode === "block_mutations") {
+                if (failureMode === "drop_messages") {
                     localHandlers.delete(handler);
                     throw error;
                 }

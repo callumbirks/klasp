@@ -22,7 +22,7 @@ import { createKlasp } from "@klasp/server";
 const realtime = redisRealtimeAdapter({
     url: process.env.REDIS_URL ?? "redis://localhost:6379",
     namespace: "my-app-dev",
-    failureMode: "block_mutations",
+    failureMode: "drop_messages",
     onError(error, context) {
         console.error("Klasp Redis realtime error", context, error);
     },
@@ -37,29 +37,13 @@ deployments, or environments.
 
 ## Redis Failure Mode
 
-By default, Redis command failures block mutations. This is the safer mode for
-multi-instance deployments because a successful mutation without cross-instance
-fanout can leave other clients showing stale data.
+`failureMode` controls what the adapter does when Redis cannot publish or
+receive invalidation messages. It does not make Redis Pub/Sub durable.
 
-```ts
-const realtime = redisRealtimeAdapter({
-    url: process.env.REDIS_URL ?? "redis://localhost:6379",
-    failureMode: "block_mutations",
-});
-```
-
-Set `failureMode` to `"local_fallback"` if the application should continue
-when Redis is unreachable. In this mode, failed publishes are delivered only to
-clients connected to the current server instance through local fallback
-handlers. Clients connected to other instances will not receive those
-invalidations.
-
-```ts
-const realtime = redisRealtimeAdapter({
-    url: process.env.REDIS_URL ?? "redis://localhost:6379",
-    failureMode: "local_fallback",
-});
-```
+| Mode | Behavior |
+| --- | --- |
+| `"drop_messages"` | Default. Redis command failures are thrown to the caller. If a mutation already wrote to your database before calling `klasp.invalidate(...)`, Klasp does not roll that write back. Connected clients may miss the realtime invalidation, but later queries/manual refreshes still read current data. |
+| `"local_fallback"` | Redis command failures are reported through `onError`, but `publishInvalidation(...)` resolves. The invalidation is sent only to clients connected to this server instance; clients on other instances miss it. |
 
 Redis Pub/Sub does not retain messages while an instance is disconnected. Klasp
 therefore cannot recover invalidations missed during Redis downtime with this
