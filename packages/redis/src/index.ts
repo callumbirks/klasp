@@ -1,4 +1,10 @@
-import type { KlaspInvalidationEvent, KlaspRealtimeAdapter } from "@klasp/core";
+import type {
+    KlaspInvalidationEvent,
+    KlaspObservabilityEvent,
+    KlaspObserve,
+    KlaspRealtimeAdapter,
+    KlaspRedisRole,
+} from "@klasp/core";
 import { createClient } from "redis";
 
 export interface RedisRealtimeAdapterOptions {
@@ -19,6 +25,7 @@ export interface RedisRealtimeAdapterOptions {
         error: unknown,
         context: RedisRealtimeAdapterErrorContext,
     ) => void;
+    observe?: KlaspObserve;
 }
 
 export type RedisRealtimeAdapterFailureMode =
@@ -69,6 +76,13 @@ export function redisRealtimeAdapter(
     let subscriberConnectPromise: Promise<void> | undefined;
 
     publisher.on("error", (error) => {
+        safeObserve(options.observe, {
+            type: "redis.client.error",
+            timestamp: Date.now(),
+            role: "publisher",
+            channel,
+            message: toSafeRedisErrorMessage(error),
+        });
         options.onError?.(error, {
             operation: "publisher-error",
             channel,
@@ -76,6 +90,13 @@ export function redisRealtimeAdapter(
     });
 
     subscriber.on("error", (error) => {
+        safeObserve(options.observe, {
+            type: "redis.client.error",
+            timestamp: Date.now(),
+            role: "subscriber",
+            channel,
+            message: toSafeRedisErrorMessage(error),
+        });
         options.onError?.(error, {
             operation: "subscriber-error",
             channel,
@@ -90,7 +111,12 @@ export function redisRealtimeAdapter(
 
     const ensurePublisherConnected = async () => {
         assertOpen();
-        publisherConnectPromise ??= connectClient(publisher).catch((error) => {
+        publisherConnectPromise ??= connectClient(
+            publisher,
+            "publisher",
+            channel,
+            options.observe,
+        ).catch((error) => {
             publisherConnectPromise = undefined;
             throw error;
         });
@@ -100,12 +126,15 @@ export function redisRealtimeAdapter(
 
     const ensureSubscriberConnected = async () => {
         assertOpen();
-        subscriberConnectPromise ??= connectClient(subscriber).catch(
-            (error) => {
-                subscriberConnectPromise = undefined;
-                throw error;
-            },
-        );
+        subscriberConnectPromise ??= connectClient(
+            subscriber,
+            "subscriber",
+            channel,
+            options.observe,
+        ).catch((error) => {
+            subscriberConnectPromise = undefined;
+            throw error;
+        });
         await subscriberConnectPromise;
         assertOpen();
     };
@@ -117,15 +146,38 @@ export function redisRealtimeAdapter(
                 topic,
                 timestamp: Date.now(),
             };
+            const startedAt = Date.now();
 
             try {
                 await ensurePublisherConnected();
                 await publisher.publish(channel, JSON.stringify(event));
+                safeObserve(options.observe, {
+                    type: "redis.publish.success",
+                    timestamp: Date.now(),
+                    channel,
+                    topic,
+                    durationMs: Date.now() - startedAt,
+                });
             } catch (error) {
+                safeObserve(options.observe, {
+                    type: "redis.publish.error",
+                    timestamp: Date.now(),
+                    channel,
+                    topic,
+                    durationMs: Date.now() - startedAt,
+                    message: toSafeRedisErrorMessage(error),
+                });
                 if (failureMode === "drop_messages") {
                     throw error;
                 }
 
+                safeObserve(options.observe, {
+                    type: "redis.fallback",
+                    timestamp: Date.now(),
+                    operation: "publish",
+                    channel,
+                    message: toSafeRedisErrorMessage(error),
+                });
                 options.onError?.(error, {
                     operation: "publish-fallback",
                     channel,
@@ -144,6 +196,12 @@ export function redisRealtimeAdapter(
                 try {
                     event = parseInvalidationEvent(message);
                 } catch (error) {
+                    safeObserve(options.observe, {
+                        type: "redis.message.error",
+                        timestamp: Date.now(),
+                        channel: receivedChannel,
+                        message: toSafeRedisErrorMessage(error),
+                    });
                     options.onError?.(error, {
                         operation: "message-parse",
                         channel: receivedChannel,
@@ -155,6 +213,12 @@ export function redisRealtimeAdapter(
                 try {
                     await handler(event);
                 } catch (error) {
+                    safeObserve(options.observe, {
+                        type: "redis.handler.error",
+                        timestamp: Date.now(),
+                        channel: receivedChannel,
+                        message: toSafeRedisErrorMessage(error),
+                    });
                     options.onError?.(error, {
                         operation: "message-handler",
                         channel: receivedChannel,
@@ -167,6 +231,7 @@ export function redisRealtimeAdapter(
             localHandlers.add(handler);
 
             let redisSubscribed = false;
+            const startedAt = Date.now();
 
             try {
                 await ensureSubscriberConnected();
@@ -174,12 +239,32 @@ export function redisRealtimeAdapter(
                 await subscriber.subscribe(channel, listener);
                 subscriptions.add(listener);
                 redisSubscribed = true;
+                safeObserve(options.observe, {
+                    type: "redis.subscribe.success",
+                    timestamp: Date.now(),
+                    channel,
+                    durationMs: Date.now() - startedAt,
+                });
             } catch (error) {
+                safeObserve(options.observe, {
+                    type: "redis.subscribe.error",
+                    timestamp: Date.now(),
+                    channel,
+                    durationMs: Date.now() - startedAt,
+                    message: toSafeRedisErrorMessage(error),
+                });
                 if (failureMode === "drop_messages") {
                     localHandlers.delete(handler);
                     throw error;
                 }
 
+                safeObserve(options.observe, {
+                    type: "redis.fallback",
+                    timestamp: Date.now(),
+                    operation: "subscribe",
+                    channel,
+                    message: toSafeRedisErrorMessage(error),
+                });
                 options.onError?.(error, {
                     operation: "subscribe-fallback",
                     channel,
@@ -194,6 +279,11 @@ export function redisRealtimeAdapter(
                 }
 
                 await subscriber.unsubscribe(channel, listener);
+                safeObserve(options.observe, {
+                    type: "redis.unsubscribe",
+                    timestamp: Date.now(),
+                    channel,
+                });
             };
         },
 
@@ -216,6 +306,11 @@ export function redisRealtimeAdapter(
                     quitClient(publisher),
                     quitClient(subscriber),
                 ]);
+                safeObserve(options.observe, {
+                    type: "redis.close",
+                    timestamp: Date.now(),
+                    channel,
+                });
             }
         },
     };
@@ -232,6 +327,12 @@ async function publishLocalInvalidation(
         try {
             await handler(event);
         } catch (error) {
+            safeObserve(options.observe, {
+                type: "redis.handler.error",
+                timestamp: Date.now(),
+                channel: "local",
+                message: toSafeRedisErrorMessage(error),
+            });
             options.onError?.(error, {
                 operation: "message-handler",
                 channel: "local",
@@ -241,12 +342,38 @@ async function publishLocalInvalidation(
     }
 }
 
-async function connectClient(client: RedisClient): Promise<void> {
+async function connectClient(
+    client: RedisClient,
+    role: KlaspRedisRole,
+    channel: string,
+    observe: KlaspObserve | undefined,
+): Promise<void> {
     if (client.isOpen) {
         return;
     }
 
-    await client.connect();
+    const startedAt = Date.now();
+
+    try {
+        await client.connect();
+        safeObserve(observe, {
+            type: "redis.connect.success",
+            timestamp: Date.now(),
+            role,
+            channel,
+            durationMs: Date.now() - startedAt,
+        });
+    } catch (error) {
+        safeObserve(observe, {
+            type: "redis.connect.error",
+            timestamp: Date.now(),
+            role,
+            channel,
+            durationMs: Date.now() - startedAt,
+            message: toSafeRedisErrorMessage(error),
+        });
+        throw error;
+    }
 }
 
 async function quitClient(client: RedisClient): Promise<void> {
@@ -261,4 +388,21 @@ function parseInvalidationEvent(message: string): KlaspInvalidationEvent {
     const event = JSON.parse(message) as KlaspInvalidationEvent;
 
     return event;
+}
+
+function toSafeRedisErrorMessage(error: unknown): string {
+    return error instanceof Error
+        ? error.message
+        : "Klasp Redis adapter error.";
+}
+
+function safeObserve(
+    observe: KlaspObserve | undefined,
+    event: KlaspObservabilityEvent,
+): void {
+    try {
+        observe?.(event);
+    } catch {
+        // Observability must not change adapter behavior.
+    }
 }

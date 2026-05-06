@@ -1,8 +1,11 @@
 import {
     KLASP_PROCEDURE_DESCRIPTOR,
     KlaspError,
+    type KlaspErrorCode,
     type KlaspInvalidationEvent,
     type KlaspLiveConfig,
+    type KlaspObservabilityEvent,
+    type KlaspObserve,
     type KlaspProcedureDescriptor,
     type KlaspRealtimeAdapter,
     type KlaspRouterContract,
@@ -17,6 +20,7 @@ export interface KlaspContext {
 export interface CreateKlaspOptions<TContext extends KlaspContext> {
     auth?: (input: { request: Request }) => Promise<TContext> | TContext;
     realtime?: KlaspRealtimeAdapter;
+    observe?: KlaspObserve;
 }
 
 type MaybePromise<T> = T | Promise<T>;
@@ -187,6 +191,7 @@ export interface Klasp<TContext extends KlaspContext = KlaspContext> {
     runtime: KlaspRuntime;
     realtime: KlaspRealtimeAdapter | undefined;
     sessions: KlaspSessionStore;
+    observe: KlaspObserve | undefined;
 }
 
 export interface KlaspSession {
@@ -245,35 +250,72 @@ function createJsonResponse(
 export async function createKlaspRpcResponse(
     options: CreateKlaspRpcResponseOptions,
 ): Promise<Response> {
+    const startedAt = Date.now();
     const parsed = await parseKlaspRpcRequest(options.request);
 
     if (!parsed.ok) {
+        safeObserve(options.klasp.observe, {
+            type: "server.rpc.error",
+            timestamp: Date.now(),
+            errorCode: "BAD_REQUEST",
+            message: parsed.message,
+        });
         return createBadRequestResponse(parsed.message);
     }
 
     const { request } = parsed;
+    safeObserve(options.klasp.observe, {
+        type: "server.rpc.start",
+        timestamp: startedAt,
+        path: request.path,
+        procedureType: request.type,
+        ...(request.clientId ? { clientId: request.clientId } : {}),
+    });
+
     const procedure = getKlaspApiProcedureMap(options.api).get(request.path);
 
     if (!procedure) {
+        const message = `Procedure '${request.path}' was not found.`;
+        safeObserve(options.klasp.observe, {
+            type: "server.rpc.error",
+            timestamp: Date.now(),
+            path: request.path,
+            procedureType: request.type,
+            ...(request.clientId ? { clientId: request.clientId } : {}),
+            durationMs: Date.now() - startedAt,
+            errorCode: "NOT_FOUND",
+            message,
+        });
         return createJsonResponse({
             ok: false,
             data: undefined,
             live: undefined,
             error: {
                 code: "NOT_FOUND",
-                message: `Procedure '${request.path}' was not found.`,
+                message,
             },
         });
     }
 
     if (request.type !== procedure.type) {
+        const message = `Procedure '${request.path}' is a ${procedure.type} but the request is a ${request.type}.`;
+        safeObserve(options.klasp.observe, {
+            type: "server.rpc.error",
+            timestamp: Date.now(),
+            path: request.path,
+            procedureType: request.type,
+            ...(request.clientId ? { clientId: request.clientId } : {}),
+            durationMs: Date.now() - startedAt,
+            errorCode: "BAD_REQUEST",
+            message,
+        });
         return createJsonResponse({
             ok: false,
             data: undefined,
             live: undefined,
             error: {
                 code: "BAD_REQUEST",
-                message: `Procedure '${request.path}' is a ${procedure.type} but the request is a ${request.type}.`,
+                message,
             },
         });
     }
@@ -304,6 +346,16 @@ export async function createKlaspRpcResponse(
             );
         }
 
+        safeObserve(options.klasp.observe, {
+            type: "server.rpc.success",
+            timestamp: Date.now(),
+            path: request.path,
+            procedureType: request.type,
+            ...(request.clientId ? { clientId: request.clientId } : {}),
+            durationMs: Date.now() - startedAt,
+            liveTopicCount: live?.topics.length ?? 0,
+        });
+
         return createJsonResponse({
             ok: true,
             data: result,
@@ -311,6 +363,18 @@ export async function createKlaspRpcResponse(
             error: undefined,
         });
     } catch (error) {
+        const safeError = toSafeKlaspError(error);
+        safeObserve(options.klasp.observe, {
+            type: "server.rpc.error",
+            timestamp: Date.now(),
+            path: request.path,
+            procedureType: request.type,
+            ...(request.clientId ? { clientId: request.clientId } : {}),
+            durationMs: Date.now() - startedAt,
+            errorCode: safeError.code,
+            message: safeError.message,
+        });
+
         if (error instanceof KlaspError) {
             return createJsonResponse({
                 ok: false,
@@ -689,6 +753,13 @@ export async function createKlaspEventsResponse(
     const clientId = getKlaspEventsClientId(options.request);
 
     if (!clientId) {
+        safeObserve(options.klasp.observe, {
+            type: "server.sse.reject",
+            timestamp: Date.now(),
+            errorCode: "BAD_REQUEST",
+            message:
+                "Klasp events requests require a non-empty clientId query parameter.",
+        });
         return createJsonResponse(
             {
                 ok: false,
@@ -740,10 +811,36 @@ function getKlaspEventsClientId(request: Request): string | null {
 export function createKlasp<TContext extends KlaspContext = KlaspContext>(
     options: CreateKlaspOptions<TContext>,
 ): Klasp<TContext> {
-    const sessions = createKlaspSessionStore();
+    const sessions = createKlaspSessionStore(options.observe);
     const runtime: KlaspRuntime = {
         async invalidate(topic: string) {
-            await options.realtime?.publishInvalidation(topic);
+            const startedAt = Date.now();
+            safeObserve(options.observe, {
+                type: "server.invalidation.start",
+                timestamp: startedAt,
+                topic,
+            });
+
+            try {
+                await options.realtime?.publishInvalidation(topic);
+                safeObserve(options.observe, {
+                    type: "server.invalidation.success",
+                    timestamp: Date.now(),
+                    topic,
+                    durationMs: Date.now() - startedAt,
+                });
+            } catch (error) {
+                const safeError = toSafeKlaspError(error);
+                safeObserve(options.observe, {
+                    type: "server.invalidation.error",
+                    timestamp: Date.now(),
+                    topic,
+                    durationMs: Date.now() - startedAt,
+                    errorCode: safeError.code,
+                    message: safeError.message,
+                });
+                throw error;
+            }
         },
     };
 
@@ -785,10 +882,13 @@ export function createKlasp<TContext extends KlaspContext = KlaspContext>(
         runtime,
         realtime: options.realtime,
         sessions,
+        observe: options.observe,
     };
 }
 
-function createKlaspSessionStore(): KlaspSessionStore {
+function createKlaspSessionStore(
+    observe: KlaspObserve | undefined,
+): KlaspSessionStore {
     const sessions = new Map<
         string,
         {
@@ -807,6 +907,11 @@ function createKlaspSessionStore(): KlaspSessionStore {
                 connection,
                 topics,
             });
+            safeObserve(observe, {
+                type: "server.sse.open",
+                timestamp: Date.now(),
+                clientId,
+            });
 
             return {
                 clientId,
@@ -815,6 +920,11 @@ function createKlaspSessionStore(): KlaspSessionStore {
 
                     if (active?.connection === connection) {
                         sessions.delete(clientId);
+                        safeObserve(observe, {
+                            type: "server.sse.close",
+                            timestamp: Date.now(),
+                            clientId,
+                        });
                     }
                 },
             };
@@ -833,10 +943,45 @@ function createKlaspSessionStore(): KlaspSessionStore {
             for (const topic of topics) {
                 session.topics.add(topic);
             }
+            safeObserve(observe, {
+                type: "server.topic.register",
+                timestamp: Date.now(),
+                clientId,
+                topics,
+                topicCount: topics.length,
+            });
         },
 
         isAuthorized(clientId: string, topic: string): boolean {
             return sessions.get(clientId)?.topics.has(topic) ?? false;
         },
     };
+}
+
+function toSafeKlaspError(error: unknown): {
+    code: KlaspErrorCode;
+    message: string;
+} {
+    if (error instanceof KlaspError) {
+        return {
+            code: error.code,
+            message: error.message,
+        };
+    }
+
+    return {
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Internal server error.",
+    };
+}
+
+function safeObserve(
+    observe: KlaspObserve | undefined,
+    event: KlaspObservabilityEvent,
+): void {
+    try {
+        observe?.(event);
+    } catch {
+        // Observability must not change application behavior.
+    }
 }

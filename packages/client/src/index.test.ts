@@ -1,4 +1,8 @@
-import { createKlaspContract, KlaspError } from "@klasp/core";
+import {
+    createKlaspContract,
+    KlaspError,
+    type KlaspObservabilityEvent,
+} from "@klasp/core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createKlaspClient } from "./index.js";
 
@@ -566,6 +570,148 @@ describe("createKlaspClient", () => {
             "error",
             "connected",
         ]);
+    });
+
+    test("emits client observability for calls, connections, invalidations, and resources", async () => {
+        vi.stubGlobal("EventSource", FakeEventSource);
+        const events: KlaspObservabilityEvent[] = [];
+        const fetch = createFetch([
+            {
+                ok: true,
+                data: ["a1"],
+                live: { topics: ["room:a"] },
+                error: undefined,
+            },
+            {
+                ok: true,
+                data: ["a2"],
+                live: { topics: ["room:a"] },
+                error: undefined,
+            },
+        ]);
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+            clientId: "client",
+            observe(event) {
+                events.push(event);
+            },
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        FakeEventSource.instances[0]?.emit("open", {});
+        await resource.refetch();
+        FakeEventSource.instances[0]?.emit("klasp.invalidate", {
+            topic: "room:a",
+        });
+        await waitFor(() => resource.getSnapshot().data?.[0] === "a2");
+        resource.dispose();
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "client.connection.status",
+                    clientId: "client",
+                    status: "connecting",
+                }),
+                expect.objectContaining({
+                    type: "client.connection.status",
+                    clientId: "client",
+                    status: "connected",
+                }),
+                expect.objectContaining({
+                    type: "client.rpc.start",
+                    path: "rooms.messages",
+                    procedureType: "query",
+                    clientId: "client",
+                }),
+                expect.objectContaining({
+                    type: "client.rpc.success",
+                    path: "rooms.messages",
+                    procedureType: "query",
+                    clientId: "client",
+                    liveTopicCount: 1,
+                    durationMs: expect.any(Number),
+                }),
+                expect.objectContaining({
+                    type: "client.resource.register",
+                    resourceId: resource.id,
+                    path: "rooms.messages",
+                    topics: ["room:a"],
+                }),
+                expect.objectContaining({
+                    type: "client.invalidation.received",
+                    topic: "room:a",
+                    matchedResourceCount: 1,
+                }),
+                expect.objectContaining({
+                    type: "client.resource.refetch",
+                    resourceId: resource.id,
+                    reason: "invalidation",
+                    status: "success",
+                    durationMs: expect.any(Number),
+                }),
+                expect.objectContaining({
+                    type: "client.resource.unregister",
+                    resourceId: resource.id,
+                    topics: ["room:a"],
+                }),
+            ]),
+        );
+    });
+
+    test("emits client RPC and resource error events", async () => {
+        const events: KlaspObservabilityEvent[] = [];
+        const fetch = createFetch([
+            {
+                ok: false,
+                data: undefined,
+                live: undefined,
+                error: {
+                    code: "FORBIDDEN",
+                    message: "Nope.",
+                },
+            },
+        ]);
+        const client = createKlaspClient({
+            endpoint: "http://localhost/klasp",
+            fetch,
+            clientId: "client",
+            observe(event) {
+                events.push(event);
+                throw new Error("observer failed");
+            },
+        });
+        const resource = client.createQueryResource<
+            { roomId: string },
+            string[]
+        >("rooms.messages", { roomId: "a" });
+
+        await expect(resource.refetch()).rejects.toMatchObject({
+            code: "FORBIDDEN",
+        });
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "client.rpc.error",
+                    path: "rooms.messages",
+                    errorCode: "FORBIDDEN",
+                    message: "Nope.",
+                }),
+                expect.objectContaining({
+                    type: "client.resource.refetch",
+                    resourceId: resource.id,
+                    reason: "manual",
+                    status: "error",
+                    errorCode: "FORBIDDEN",
+                    message: "Nope.",
+                }),
+            ]),
+        );
     });
 });
 

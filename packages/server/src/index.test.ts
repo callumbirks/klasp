@@ -1,4 +1,8 @@
-import { KlaspError, type KlaspInvalidationEvent } from "@klasp/core";
+import {
+    KlaspError,
+    type KlaspInvalidationEvent,
+    type KlaspObservabilityEvent,
+} from "@klasp/core";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
@@ -36,9 +40,16 @@ function createMemoryRealtimeAdapter() {
     };
 }
 
-function createTestApi() {
+function createTestApi(observe?: (event: KlaspObservabilityEvent) => void) {
     const realtime = createMemoryRealtimeAdapter();
-    const klasp = createKlasp({ realtime });
+    const klasp = createKlasp(
+        observe
+            ? {
+                  realtime,
+                  observe,
+              }
+            : { realtime },
+    );
     const api = klasp.router({
         rooms: {
             messages: klasp.query({
@@ -547,5 +558,158 @@ describe("procedure input validation", () => {
             ok: true,
             data: { raw: true },
         });
+    });
+});
+
+describe("server observability", () => {
+    test("emits RPC start, topic registration, and success events", async () => {
+        const events: KlaspObservabilityEvent[] = [];
+        const { klasp, api } = createTestApi((event) => {
+            events.push(event);
+        });
+        const client = await openEvents(klasp, "client");
+
+        await query(klasp, api, "client", "a");
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "server.sse.open",
+                    clientId: "client",
+                }),
+                expect.objectContaining({
+                    type: "server.rpc.start",
+                    path: "rooms.messages",
+                    procedureType: "query",
+                    clientId: "client",
+                }),
+                expect.objectContaining({
+                    type: "server.topic.register",
+                    clientId: "client",
+                    topics: ["room:a"],
+                    topicCount: 1,
+                }),
+                expect.objectContaining({
+                    type: "server.rpc.success",
+                    path: "rooms.messages",
+                    procedureType: "query",
+                    clientId: "client",
+                    liveTopicCount: 1,
+                    durationMs: expect.any(Number),
+                }),
+            ]),
+        );
+
+        client.abort();
+    });
+
+    test("emits validation and internal RPC errors without leaking internals", async () => {
+        const events: KlaspObservabilityEvent[] = [];
+        const klasp = createKlasp({
+            observe(event) {
+                events.push(event);
+            },
+        });
+        const api = klasp.router({
+            invalid: klasp.query({
+                input() {
+                    throw new KlaspError(
+                        "VALIDATION_ERROR",
+                        "Invalid procedure input.",
+                    );
+                },
+                handler() {
+                    return null;
+                },
+            }),
+            internal: klasp.query({
+                handler() {
+                    throw new Error("database password is hunter2");
+                },
+            }),
+        });
+
+        await rpc(klasp, api, {
+            version: 1,
+            type: "query",
+            path: "invalid",
+        });
+        await rpc(klasp, api, {
+            version: 1,
+            type: "query",
+            path: "internal",
+        });
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "server.rpc.error",
+                    path: "invalid",
+                    errorCode: "VALIDATION_ERROR",
+                    message: "Invalid procedure input.",
+                }),
+                expect.objectContaining({
+                    type: "server.rpc.error",
+                    path: "internal",
+                    errorCode: "INTERNAL_SERVER_ERROR",
+                    message: "Internal server error.",
+                }),
+            ]),
+        );
+        expect(JSON.stringify(events)).not.toContain("hunter2");
+    });
+
+    test("emits invalidation lifecycle and swallows observer errors", async () => {
+        const events: KlaspObservabilityEvent[] = [];
+        const { klasp } = createTestApi((event) => {
+            events.push(event);
+            throw new Error("observer failed");
+        });
+
+        await expect(klasp.runtime.invalidate("room:a")).resolves.toBe(
+            undefined,
+        );
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "server.invalidation.start",
+                    topic: "room:a",
+                }),
+                expect.objectContaining({
+                    type: "server.invalidation.success",
+                    topic: "room:a",
+                    durationMs: expect.any(Number),
+                }),
+            ]),
+        );
+    });
+
+    test("emits SSE reject and close events", async () => {
+        const events: KlaspObservabilityEvent[] = [];
+        const { klasp } = createTestApi((event) => {
+            events.push(event);
+        });
+
+        await createKlaspEventsResponse({
+            klasp,
+            request: new Request("http://localhost/klasp/events"),
+        });
+        const client = await openEvents(klasp, "client");
+        client.abort();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "server.sse.reject",
+                    errorCode: "BAD_REQUEST",
+                }),
+                expect.objectContaining({
+                    type: "server.sse.close",
+                    clientId: "client",
+                }),
+            ]),
+        );
     });
 });

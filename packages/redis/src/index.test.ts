@@ -1,4 +1,7 @@
-import type { KlaspInvalidationEvent } from "@klasp/core";
+import type {
+    KlaspInvalidationEvent,
+    KlaspObservabilityEvent,
+} from "@klasp/core";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { redisRealtimeAdapter } from "./index.js";
 
@@ -438,6 +441,127 @@ describe("redisRealtimeAdapter", () => {
         );
         expect(getClient(3).subscribe.mock.calls[0]?.[0]).toBe(
             "production:invalidations",
+        );
+    });
+
+    test("emits Redis observability for connect, publish, subscribe, unsubscribe, and close", async () => {
+        const events: KlaspObservabilityEvent[] = [];
+        const adapter = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            observe(event) {
+                events.push(event);
+            },
+        });
+
+        await adapter.publishInvalidation("room:a");
+        const unsubscribe = await adapter.subscribeInvalidations(vi.fn());
+        await unsubscribe();
+        await adapter.close?.();
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "redis.connect.success",
+                    role: "publisher",
+                    channel: "klasp:invalidations",
+                    durationMs: expect.any(Number),
+                }),
+                expect.objectContaining({
+                    type: "redis.publish.success",
+                    channel: "klasp:invalidations",
+                    topic: "room:a",
+                    durationMs: expect.any(Number),
+                }),
+                expect.objectContaining({
+                    type: "redis.connect.success",
+                    role: "subscriber",
+                    channel: "klasp:invalidations",
+                }),
+                expect.objectContaining({
+                    type: "redis.subscribe.success",
+                    channel: "klasp:invalidations",
+                }),
+                expect.objectContaining({
+                    type: "redis.unsubscribe",
+                    channel: "klasp:invalidations",
+                }),
+                expect.objectContaining({
+                    type: "redis.close",
+                    channel: "klasp:invalidations",
+                }),
+            ]),
+        );
+    });
+
+    test("emits Redis error, fallback, malformed message, and handler failure events", async () => {
+        const events: KlaspObservabilityEvent[] = [];
+        const adapter = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            failureMode: "local_fallback",
+            observe(event) {
+                events.push(event);
+                throw new Error("observer failed");
+            },
+        });
+        const publisher = getClient(0);
+        const subscriber = getClient(1);
+        const handlerError = new Error("handler failed");
+        const handler = vi.fn(async () => {
+            throw handlerError;
+        });
+
+        await adapter.subscribeInvalidations(handler);
+        const listener = subscriber.subscribe.mock.calls[0]?.[1];
+
+        if (!listener) {
+            throw new Error("Expected subscription listener.");
+        }
+
+        publisher.publish.mockRejectedValueOnce(new Error("publish failed"));
+        await adapter.publishInvalidation("room:a");
+        publisher.emitError(new Error("publisher failed"));
+        await listener("not json", "klasp:invalidations");
+        await listener(
+            JSON.stringify({
+                type: "invalidate",
+                topic: "room:a",
+                timestamp: 1,
+            } satisfies KlaspInvalidationEvent),
+            "klasp:invalidations",
+        );
+
+        expect(events).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    type: "redis.publish.error",
+                    topic: "room:a",
+                    message: "publish failed",
+                }),
+                expect.objectContaining({
+                    type: "redis.fallback",
+                    operation: "publish",
+                    message: "publish failed",
+                }),
+                expect.objectContaining({
+                    type: "redis.client.error",
+                    role: "publisher",
+                    message: "publisher failed",
+                }),
+                expect.objectContaining({
+                    type: "redis.message.error",
+                    channel: "klasp:invalidations",
+                }),
+                expect.objectContaining({
+                    type: "redis.handler.error",
+                    channel: "local",
+                    message: "handler failed",
+                }),
+                expect.objectContaining({
+                    type: "redis.handler.error",
+                    channel: "klasp:invalidations",
+                    message: "handler failed",
+                }),
+            ]),
         );
     });
 });

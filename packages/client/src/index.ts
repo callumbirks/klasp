@@ -1,6 +1,9 @@
 import {
     KLASP_PROCEDURE_DESCRIPTOR,
     KlaspError,
+    type KlaspErrorCode,
+    type KlaspObservabilityEvent,
+    type KlaspObserve,
     type KlaspProcedureDescriptor,
     type KlaspRpcRequest,
     type KlaspRpcResponse,
@@ -13,6 +16,7 @@ export interface CreateKlaspClientOptions<
     api?: TApi;
     fetch?: typeof fetch;
     clientId?: string;
+    observe?: KlaspObserve;
 }
 
 export type KlaspQueryProcedure<
@@ -77,6 +81,8 @@ export interface KlaspInvalidationMessage {
     topic: string;
 }
 
+type KlaspQueryResourceRefetchReason = "manual" | "invalidation" | "reconnect";
+
 export interface KlaspClient<
     _TApi extends Record<string, unknown> = Record<string, unknown>,
 > {
@@ -129,8 +135,11 @@ export function createKlaspClient<
     const resourcesById = new Map<
         string,
         {
+            path: string;
             topics: string[];
-            refresh: () => Promise<unknown>;
+            refresh: (
+                reason: KlaspQueryResourceRefetchReason,
+            ) => Promise<unknown>;
         }
     >();
     const resourcesByTopic = new Map<string, Set<string>>();
@@ -148,6 +157,12 @@ export function createKlaspClient<
         }
 
         connectionStatus = status;
+        safeObserve(options.observe, {
+            type: "client.connection.status",
+            timestamp: Date.now(),
+            clientId,
+            status,
+        });
         for (const listener of connectionListeners) {
             listener(connectionStatus);
         }
@@ -158,6 +173,14 @@ export function createKlaspClient<
         path: string,
         input: TInput,
     ): Promise<KlaspRpcResponse<TOutput>> => {
+        const startedAt = Date.now();
+        safeObserve(options.observe, {
+            type: "client.rpc.start",
+            timestamp: startedAt,
+            path,
+            procedureType: type,
+            clientId,
+        });
         const request: KlaspRpcRequest<TInput> = {
             version: 1,
             type,
@@ -165,21 +188,77 @@ export function createKlaspClient<
             input,
             clientId,
         };
-        const response = await fetchImpl(`${options.endpoint}/rpc`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify(request),
-        });
+        try {
+            const response = await fetchImpl(`${options.endpoint}/rpc`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(request),
+            });
 
-        // Klasp protocol errors are serialized as RPC responses. Non-OK HTTP
-        // responses mean the transport itself failed.
-        if (!response.ok) {
-            throw new Error(`Klasp call failed: ${response.status}`);
+            // Klasp protocol errors are serialized as RPC responses. Non-OK HTTP
+            // responses mean the transport itself failed.
+            if (!response.ok) {
+                const message = `Klasp call failed: ${response.status}`;
+                safeObserve(options.observe, {
+                    type: "client.rpc.error",
+                    timestamp: Date.now(),
+                    path,
+                    procedureType: type,
+                    clientId,
+                    durationMs: Date.now() - startedAt,
+                    message,
+                });
+                throw new Error(message);
+            }
+
+            const rpcResponse =
+                (await response.json()) as KlaspRpcResponse<TOutput>;
+
+            if (rpcResponse.ok) {
+                safeObserve(options.observe, {
+                    type: "client.rpc.success",
+                    timestamp: Date.now(),
+                    path,
+                    procedureType: type,
+                    clientId,
+                    durationMs: Date.now() - startedAt,
+                    liveTopicCount: rpcResponse.live?.topics.length ?? 0,
+                });
+            } else {
+                safeObserve(options.observe, {
+                    type: "client.rpc.error",
+                    timestamp: Date.now(),
+                    path,
+                    procedureType: type,
+                    clientId,
+                    durationMs: Date.now() - startedAt,
+                    errorCode: rpcResponse.error.code,
+                    message: rpcResponse.error.message,
+                });
+            }
+
+            return rpcResponse;
+        } catch (error) {
+            if (
+                error instanceof Error &&
+                error.message.startsWith("Klasp call failed:")
+            ) {
+                throw error;
+            }
+
+            safeObserve(options.observe, {
+                type: "client.rpc.error",
+                timestamp: Date.now(),
+                path,
+                procedureType: type,
+                clientId,
+                durationMs: Date.now() - startedAt,
+                message: toSafeClientErrorMessage(error),
+            });
+            throw error;
         }
-
-        return (await response.json()) as KlaspRpcResponse<TOutput>;
     };
 
     const resolvePath = (
@@ -203,12 +282,21 @@ export function createKlaspClient<
         }
 
         resourcesById.delete(id);
+        safeObserve(options.observe, {
+            type: "client.resource.unregister",
+            timestamp: Date.now(),
+            clientId,
+            resourceId: id,
+            topics: previous.topics,
+            topicCount: previous.topics.length,
+        });
     };
 
     const registerResource = (
         id: string,
+        path: string,
         topics: string[],
-        refresh: () => Promise<unknown>,
+        refresh: (reason: KlaspQueryResourceRefetchReason) => Promise<unknown>,
     ) => {
         unregisterResource(id);
 
@@ -217,6 +305,7 @@ export function createKlaspClient<
         }
 
         resourcesById.set(id, {
+            path,
             topics,
             refresh,
         });
@@ -226,23 +315,40 @@ export function createKlaspClient<
             ids.add(id);
             resourcesByTopic.set(topic, ids);
         }
+        safeObserve(options.observe, {
+            type: "client.resource.register",
+            timestamp: Date.now(),
+            clientId,
+            resourceId: id,
+            path,
+            topics,
+            topicCount: topics.length,
+        });
     };
 
     const invalidate = (topic: string) => {
         const resourceIds = resourcesByTopic.get(topic);
+        safeObserve(options.observe, {
+            type: "client.invalidation.received",
+            timestamp: Date.now(),
+            clientId,
+            topic,
+            matchedResourceCount: resourceIds?.size ?? 0,
+        });
+
         if (!resourceIds) {
             return;
         }
 
         for (const resourceId of Array.from(resourceIds)) {
             const resource = resourcesById.get(resourceId);
-            void resource?.refresh();
+            void resource?.refresh("invalidation");
         }
     };
 
     const refreshLiveResources = () => {
         for (const resource of Array.from(resourcesById.values())) {
-            void resource.refresh();
+            void resource.refresh("reconnect");
         }
     };
 
@@ -341,6 +447,8 @@ export function createKlaspClient<
                     rawCall<TInput, TOutput>("query", path, nextInput),
                 register: registerResource,
                 unregister: unregisterResource,
+                observe: options.observe,
+                clientId,
             });
         },
 
@@ -452,21 +560,26 @@ export function getKlaspProcedurePath(
 }
 
 interface CreateInternalQueryResourceOptions<TInput, TData> {
+    clientId: string;
     enabled?: boolean;
     input: TInput;
+    observe: KlaspObserve | undefined;
     path: string;
     rawQuery(input: TInput): Promise<KlaspRpcResponse<TData>>;
     register(
         id: string,
+        path: string,
         topics: string[],
-        refresh: () => Promise<unknown>,
+        refresh: (reason: KlaspQueryResourceRefetchReason) => Promise<unknown>,
     ): void;
     unregister(id: string): void;
 }
 
 function createKlaspQueryResource<TInput, TData>({
+    clientId,
     enabled = true,
     input,
+    observe,
     path,
     rawQuery,
     register,
@@ -524,7 +637,9 @@ function createKlaspQueryResource<TInput, TData>({
             };
         },
 
-        async refetch(): Promise<TData> {
+        async refetch(
+            reason: KlaspQueryResourceRefetchReason = "manual",
+        ): Promise<TData> {
             if (disposed) {
                 throw new Error(
                     "Cannot refetch a disposed Klasp query resource.",
@@ -533,6 +648,16 @@ function createKlaspQueryResource<TInput, TData>({
 
             const nextRequestId = requestId + 1;
             requestId = nextRequestId;
+            const startedAt = Date.now();
+            safeObserve(observe, {
+                type: "client.resource.refetch",
+                timestamp: startedAt,
+                clientId,
+                resourceId: id,
+                path,
+                reason,
+                status: "start",
+            });
             setState(state.data, null, "loading");
 
             try {
@@ -544,9 +669,23 @@ function createKlaspQueryResource<TInput, TData>({
                 }
 
                 setState(data, null, "success");
-                register(id, response.live?.topics ?? [], () =>
-                    resource.refetch(),
+                register(id, path, response.live?.topics ?? [], (nextReason) =>
+                    (
+                        resource.refetch as (
+                            reason: KlaspQueryResourceRefetchReason,
+                        ) => Promise<TData>
+                    )(nextReason),
                 );
+                safeObserve(observe, {
+                    type: "client.resource.refetch",
+                    timestamp: Date.now(),
+                    clientId,
+                    resourceId: id,
+                    path,
+                    reason,
+                    status: "success",
+                    durationMs: Date.now() - startedAt,
+                });
 
                 return data;
             } catch (error) {
@@ -556,6 +695,17 @@ function createKlaspQueryResource<TInput, TData>({
                     setState(state.data, nextError, "error");
                     unregister(id);
                 }
+                safeObserve(observe, {
+                    type: "client.resource.refetch",
+                    timestamp: Date.now(),
+                    clientId,
+                    resourceId: id,
+                    path,
+                    reason,
+                    status: "error",
+                    durationMs: Date.now() - startedAt,
+                    ...toSafeClientErrorFields(nextError),
+                });
 
                 throw nextError;
             }
@@ -688,4 +838,35 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
         value !== null &&
         Object.getPrototypeOf(value) === Object.prototype
     );
+}
+
+function toSafeClientErrorFields(error: unknown): {
+    errorCode?: KlaspErrorCode;
+    message: string;
+} {
+    if (error instanceof KlaspError) {
+        return {
+            errorCode: error.code,
+            message: error.message,
+        };
+    }
+
+    return {
+        message: toSafeClientErrorMessage(error),
+    };
+}
+
+function toSafeClientErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : "Klasp client error.";
+}
+
+function safeObserve(
+    observe: KlaspObserve | undefined,
+    event: KlaspObservabilityEvent,
+): void {
+    try {
+        observe?.(event);
+    } catch {
+        // Observability must not change application behavior.
+    }
 }
