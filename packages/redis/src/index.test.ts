@@ -77,6 +77,7 @@ const redisMock = vi.hoisted(() => {
     }
 
     const clients: Client[] = [];
+    const subscriptionsByChannel = new Map<string, Set<SubscriptionListener>>();
 
     const createFakeClient = (): Client => {
         const errorListeners = new Set<ErrorListener>();
@@ -85,9 +86,29 @@ const redisMock = vi.hoisted(() => {
             connect: vi.fn(async () => {
                 client.isOpen = true;
             }),
-            publish: vi.fn(async () => 1),
-            subscribe: vi.fn(async () => {}),
-            unsubscribe: vi.fn(async () => {}),
+            publish: vi.fn(async (channel, message) => {
+                const listeners = subscriptionsByChannel.get(channel);
+
+                for (const listener of listeners ?? []) {
+                    await listener(message, channel);
+                }
+
+                return listeners?.size ?? 0;
+            }),
+            subscribe: vi.fn(async (channel, listener) => {
+                const listeners =
+                    subscriptionsByChannel.get(channel) ?? new Set();
+                listeners.add(listener);
+                subscriptionsByChannel.set(channel, listeners);
+            }),
+            unsubscribe: vi.fn(async (channel, listener) => {
+                const listeners = subscriptionsByChannel.get(channel);
+                listeners?.delete(listener);
+
+                if (listeners?.size === 0) {
+                    subscriptionsByChannel.delete(channel);
+                }
+            }),
             quit: vi.fn(async () => {
                 client.isOpen = false;
             }),
@@ -110,6 +131,7 @@ const redisMock = vi.hoisted(() => {
     return {
         clients,
         createClient: vi.fn(createFakeClient),
+        subscriptionsByChannel,
     };
 });
 
@@ -139,6 +161,7 @@ function createDeferred() {
 beforeEach(() => {
     redisMock.clients.length = 0;
     redisMock.createClient.mockClear();
+    redisMock.subscriptionsByChannel.clear();
 });
 
 describe("redisRealtimeAdapter", () => {
@@ -422,6 +445,60 @@ describe("redisRealtimeAdapter", () => {
         expect(getClient(2).publish.mock.calls[0]?.[0]).toBe(
             "app-b:invalidations",
         );
+    });
+
+    test("fans out invalidations across adapter instances using the same namespace", async () => {
+        const first = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            namespace: "shared",
+        });
+        const second = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            namespace: "shared",
+        });
+        const firstHandler = vi.fn();
+        const secondHandler = vi.fn();
+
+        await first.subscribeInvalidations(firstHandler);
+        await second.subscribeInvalidations(secondHandler);
+        await first.publishInvalidation("room:a");
+
+        expect(firstHandler).toHaveBeenCalledWith(
+            expect.objectContaining({
+                type: "invalidate",
+                topic: "room:a",
+            }),
+        );
+        expect(secondHandler).toHaveBeenCalledWith(
+            expect.objectContaining({
+                type: "invalidate",
+                topic: "room:a",
+            }),
+        );
+    });
+
+    test("does not fan out invalidations across different namespaces", async () => {
+        const first = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            namespace: "app-a",
+        });
+        const second = redisRealtimeAdapter({
+            url: "redis://localhost:6379",
+            namespace: "app-b",
+        });
+        const firstHandler = vi.fn();
+        const secondHandler = vi.fn();
+
+        await first.subscribeInvalidations(firstHandler);
+        await second.subscribeInvalidations(secondHandler);
+        await first.publishInvalidation("room:a");
+
+        expect(firstHandler).toHaveBeenCalledWith(
+            expect.objectContaining({
+                topic: "room:a",
+            }),
+        );
+        expect(secondHandler).not.toHaveBeenCalled();
     });
 
     test("custom namespace changes the channel from the default", async () => {

@@ -390,6 +390,67 @@ describe("RPC protocol hardening", () => {
         });
     });
 
+    test("discovers and executes deeply nested query and mutation paths", async () => {
+        const invalidatedTopics: string[] = [];
+        const klasp = createKlasp({
+            realtime: {
+                async publishInvalidation(topic) {
+                    invalidatedTopics.push(topic);
+                },
+                async subscribeInvalidations() {
+                    return async () => {};
+                },
+            },
+        });
+        const api = klasp.router({
+            admin: {
+                rooms: {
+                    messages: {
+                        list: klasp.query({
+                            handler({ input }) {
+                                return input;
+                            },
+                        }),
+                        send: klasp.mutation({
+                            async handler({ input, klasp: runtime }) {
+                                await runtime.invalidate(
+                                    `nested:${(input as { roomId: string }).roomId}`,
+                                );
+                                return { sent: true, input };
+                            },
+                        }),
+                    },
+                },
+            },
+        });
+
+        const queryResponse = await rpc(klasp, api, {
+            version: 1,
+            type: "query",
+            path: "admin.rooms.messages.list",
+            input: { roomId: "a" },
+        });
+        const mutationResponse = await rpc(klasp, api, {
+            version: 1,
+            type: "mutation",
+            path: "admin.rooms.messages.send",
+            input: { roomId: "a" },
+        });
+
+        await expect(queryResponse.json()).resolves.toMatchObject({
+            ok: true,
+            data: { roomId: "a" },
+        });
+        await expect(mutationResponse.json()).resolves.toMatchObject({
+            ok: true,
+            data: {
+                sent: true,
+                input: { roomId: "a" },
+            },
+        });
+        expect(invalidatedTopics).toEqual(["nested:a"]);
+    });
+
     test("preserves KlaspError code, message, and details", async () => {
         const klasp = createKlasp({});
         const api = klasp.router({

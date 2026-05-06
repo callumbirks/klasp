@@ -16,6 +16,7 @@
     "scripts": {
         "build": "tsup",
         "dev": "tsup --watch",
+        "test": "vitest run",
         "typecheck": "tsc --noEmit",
         "lint": "biome check ."
     },
@@ -27,6 +28,10 @@
         "react": "^18.0.0 || ^19.0.0"
     },
     "devDependencies": {
-        "@types/react": "^19.2.14"
+        "@types/react": "^19.2.14",
+        "@types/react-dom": "19.2.3",
+        "happy-dom": "^20.9.0",
+        "react": "19.2.5",
+        "react-dom": "19.2.5"
     }
 }

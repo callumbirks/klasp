@@ -157,6 +157,19 @@ describe("createKlaspClient", () => {
         ]);
     });
 
+    test("throws when a contract procedure is not present in the provided api tree", async () => {
+        const detached = contract.query<{ roomId: string }, string[]>();
+        const client = createKlaspClient({
+            api,
+            endpoint: "http://localhost/klasp",
+            fetch: vi.fn() as unknown as typeof fetch,
+        });
+
+        await expect(client.query(detached, { roomId: "a" })).rejects.toThrow(
+            "Klasp procedure was not found in the provided api tree.",
+        );
+    });
+
     test("throws KlaspError for failed RPC responses", async () => {
         const fetch = createFetch([
             {
