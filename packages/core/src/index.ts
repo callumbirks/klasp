@@ -24,6 +24,7 @@ export interface KlaspRealtimeAdapter {
     subscribeInvalidations(
         handler: (event: KlaspInvalidationEvent) => Promise<void> | void,
     ): Promise<() => Promise<void>>;
+    close?(): Promise<void>;
 }
 
 export interface KlaspInvalidationEvent {
