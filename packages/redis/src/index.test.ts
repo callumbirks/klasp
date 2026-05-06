@@ -262,11 +262,11 @@ describe("redisRealtimeAdapter", () => {
         await expect(unsubscribe()).rejects.toBe(unsubscribeError);
     });
 
-    test("allows mutations and notifies local subscribers when publishing fails in allow_mutations mode", async () => {
+    test("allows mutations and notifies local subscribers when publishing fails in local_fallback mode", async () => {
         const onError = vi.fn();
         const adapter = redisRealtimeAdapter({
             url: "redis://localhost:6379",
-            failureMode: "allow_mutations",
+            failureMode: "local_fallback",
             onError,
         });
         const publisher = getClient(0);
@@ -292,11 +292,11 @@ describe("redisRealtimeAdapter", () => {
         });
     });
 
-    test("keeps local subscriptions when subscribing fails in allow_mutations mode", async () => {
+    test("keeps local subscriptions when subscribing fails in local_fallback mode", async () => {
         const onError = vi.fn();
         const adapter = redisRealtimeAdapter({
             url: "redis://localhost:6379",
-            failureMode: "allow_mutations",
+            failureMode: "local_fallback",
             onError,
         });
         const publisher = getClient(0);

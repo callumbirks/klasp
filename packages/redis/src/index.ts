@@ -12,8 +12,8 @@ export interface RedisRealtimeAdapterOptions {
 }
 
 export type RedisRealtimeAdapterFailureMode =
-    | "allow_mutations"
-    | "local_fallback";
+    | "local_fallback"
+    | "block_mutations";
 
 export type RedisRealtimeAdapterErrorContext =
     | {
@@ -40,7 +40,7 @@ type InvalidationHandler = Parameters<
 >[0];
 
 const DEFAULT_NAMESPACE = "klasp";
-const DEFAULT_FAILURE_MODE: RedisRealtimeAdapterFailureMode = "local_fallback";
+const DEFAULT_FAILURE_MODE: RedisRealtimeAdapterFailureMode = "block_mutations";
 
 export function redisRealtimeAdapter(
     options: RedisRealtimeAdapterOptions,
@@ -112,7 +112,7 @@ export function redisRealtimeAdapter(
                 await ensurePublisherConnected();
                 await publisher.publish(channel, JSON.stringify(event));
             } catch (error) {
-                if (failureMode === "local_fallback") {
+                if (failureMode === "block_mutations") {
                     throw error;
                 }
 
@@ -165,7 +165,7 @@ export function redisRealtimeAdapter(
                 subscriptions.add(listener);
                 redisSubscribed = true;
             } catch (error) {
-                if (failureMode === "local_fallback") {
+                if (failureMode === "block_mutations") {
                     localHandlers.delete(handler);
                     throw error;
                 }

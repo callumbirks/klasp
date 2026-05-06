@@ -22,7 +22,7 @@ import { createKlasp } from "@klasp/server";
 const realtime = redisRealtimeAdapter({
     url: process.env.REDIS_URL ?? "redis://localhost:6379",
     namespace: "my-app-dev",
-    failureMode: "local_fallback",
+    failureMode: "block_mutations",
     onError(error, context) {
         console.error("Klasp Redis realtime error", context, error);
     },
@@ -44,11 +44,11 @@ fanout can leave other clients showing stale data.
 ```ts
 const realtime = redisRealtimeAdapter({
     url: process.env.REDIS_URL ?? "redis://localhost:6379",
-    failureMode: "local_fallback",
+    failureMode: "block_mutations",
 });
 ```
 
-Set `failureMode` to `"allow_mutations"` if the application should continue
+Set `failureMode` to `"local_fallback"` if the application should continue
 when Redis is unreachable. In this mode, failed publishes are delivered only to
 clients connected to the current server instance through local fallback
 handlers. Clients connected to other instances will not receive those
@@ -57,7 +57,7 @@ invalidations.
 ```ts
 const realtime = redisRealtimeAdapter({
     url: process.env.REDIS_URL ?? "redis://localhost:6379",
-    failureMode: "allow_mutations",
+    failureMode: "local_fallback",
 });
 ```
 
